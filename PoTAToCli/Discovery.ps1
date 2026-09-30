@@ -72,22 +72,7 @@ function Get-PotatoFocusedElement { [System.Windows.Automation.AutomationElement
 
 function Wait-PotatoExpectedFocus {
     param([string]$SelectorJson, [int]$TimeoutMs=2000)
-    if ($TimeoutMs -lt 0 -or $TimeoutMs -gt 10000) { throw 'FocusTimeoutMs must be 0..10000.' }
-    $selector=ConvertFrom-PotatoJsonArgument $SelectorJson
-    if (-not $selector -or (-not $selector.Name -and -not $selector.AutomationId -and -not $selector.ClassName -and -not $selector.ControlType) -or $selector.path -or $selector.target) { throw 'ExpectedFocusJson needs a simple identity selector, not a path or empty selector.' }
-    $watch=[Diagnostics.Stopwatch]::StartNew()
-    do {
-        try {
-            $element=Get-PotatoFocusedElement
-            if ($element -and (Test-PotatoElementMatch $element $selector)) {
-                Assert-PotatoForegroundInput $element
-                return $element
-            }
-        } catch { }
-        if ($watch.ElapsedMilliseconds -ge $TimeoutMs) { break }
-        Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(50, $TimeoutMs-$watch.ElapsedMilliseconds)))
-    } while ($true)
-    throw 'Expected focused control did not become ready; no input was sent. Observe focus and prefer writable type -PreDelete -Verify when the control exposes text patterns. Do not click a selected filename just to wait for it.'
+    return (Wait-PotatoInputFocus $SelectorJson $TimeoutMs).element
 }
 
 function Get-PotatoCompactElements {

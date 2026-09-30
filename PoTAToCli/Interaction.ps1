@@ -159,8 +159,14 @@ function Invoke-PotatoPressKey {
     [void](Get-PotatoWorkingElement -Required)
     $before = $null
     for ($i=0; $i -lt $count; $i++) {
-        $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
-        Assert-PotatoForegroundInput $focused
+        try {
+            $inputFocus=Wait-PotatoInputFocus '' (ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('FocusTimeoutMs')) 2000)
+            $focused=$inputFocus.element
+            Assert-PotatoInputFocusUnchanged $inputFocus
+        } catch {
+            if ($i -gt 0) { $_.Exception.Data['NoInputSent']=$false }
+            throw
+        }
         if ($i -eq 0) { $before = ConvertTo-PotatoElementInfo $focused }
         [System.Windows.Forms.SendKeys]::SendWait($keys[$key])
     }

@@ -1,3 +1,36 @@
+function Read-PotatoPdfSnapshot {
+    param([string]$Path,[int]$TimeoutMs=5000)
+    if ($TimeoutMs -lt 0 -or $TimeoutMs -gt 60000) { throw 'PDF TimeoutMs must be 0..60000.' }
+    $file=Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($file.PSIsContainer -or $file.PSProvider.Name -ne 'FileSystem') { throw 'PDF path must be a file.' }
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        $stream=$null; $buffer=$null
+        try {
+            $file.Refresh()
+            $length=$file.Length; $modified=$file.LastWriteTimeUtc.Ticks
+            # Print/export producers can retain a write handle after flushing.
+            # Shared read observes bytes only; the file must not change during it.
+            $stream=[IO.File]::Open($file.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+            $buffer=New-Object IO.MemoryStream
+            $stream.CopyTo($buffer)
+            $file.Refresh()
+            if ($length -eq $file.Length -and $modified -eq $file.LastWriteTimeUtc.Ticks -and $buffer.Length -eq $length) { return ,$buffer.ToArray() }
+            $lastError='The file changed during the read.'
+        } catch {
+            $exception=$_.Exception
+            while ($exception.InnerException) { $exception=$exception.InnerException }
+            if (($exception.HResult -band 0xffff) -notin @(32,33)) { throw }
+            $lastError=$exception.Message
+        } finally {
+            if ($stream) { $stream.Dispose() }
+            if ($buffer) { $buffer.Dispose() }
+        }
+        if ($watch.ElapsedMilliseconds -ge $TimeoutMs) { throw "PDF remained locked or changing for $TimeoutMs ms. $lastError" }
+        Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(100,$TimeoutMs-$watch.ElapsedMilliseconds)))
+    } while ($true)
+}
+
 function Read-PotatoPdfText {
     <#
     .SYNOPSIS
@@ -10,14 +43,15 @@ function Read-PotatoPdfText {
     #>
     [CmdletBinding()]
     [OutputType([string])]
-    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Path)
+    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string] $Path,[int]$TimeoutMs=5000)
 
     $ErrorActionPreference = 'Stop'
     $file = Get-Item -LiteralPath $Path -ErrorAction Stop
     if ($file.PSIsContainer -or $file.PSProvider.Name -ne 'FileSystem') { throw 'PDF path must be a file.' }
     $latin1 = [Text.Encoding]::GetEncoding(28591)
-    $raw = $latin1.GetString([IO.File]::ReadAllBytes($file.FullName))
+    $raw = $latin1.GetString((Read-PotatoPdfSnapshot $file.FullName $TimeoutMs))
     if (-not $raw.StartsWith('%PDF-')) { throw 'Not a PDF file.' }
+    if ($raw -notmatch '%%EOF[\x00\x09\x0A\x0C\x0D\x20]*\z') { throw 'Incomplete PDF: missing final EOF marker. Wait for export completion before reading.' }
 
     # Latin-1 preserves byte offsets. Skip streams by /Length so embedded font or
     # image bytes containing PDF-looking tokens cannot become document objects.

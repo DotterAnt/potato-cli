@@ -1,6 +1,7 @@
 ﻿. (Join-Path $PSScriptRoot 'Interaction.ps1')
 . (Join-Path $PSScriptRoot 'Pdf.ps1')
 . (Join-Path $PSScriptRoot 'Discovery.ps1')
+. (Join-Path $PSScriptRoot 'Focus.ps1')
 $script:CliRoot = $null
 $script:StateRoot = $null
 $script:StatePath = $null
@@ -483,10 +484,9 @@ function New-PotatoSearchCondition {
     if (ConvertTo-PotatoBool $Selector.Regex $false) { return [System.Windows.Automation.Condition]::TrueCondition }
 
     if ($Selector.ProcessId) { $conditions += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$Selector.ProcessId) }
-    if ($Selector.InteractiveOnly) {
-        $conditions += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::IsOffscreenProperty, $false)
-        $conditions += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::IsEnabledProperty, $true)
-    }
+    # Some custom providers report visibility/enabled correctly on Current but
+    # omit the same controls when these properties are in a compound FindAll.
+    # Test-PotatoElementMatch enforces both locally; never relax eligibility.
     # Push exact type predicates as well as strings. OR with the localized name
     # preserves the existing public matcher while avoiding marshaling every cell.
     if ($Selector.ControlType -and @($Selector.ControlType | Where-Object { "$_" -match '[\*\?\[]' }).Count -eq 0) {
@@ -1093,6 +1093,7 @@ function Invoke-PotatoObserve {
         return [ordered]@{scope=(Get-PotatoArg $ArgsMap @('Scope') 'Working');
             root=$(if ($root) { ConvertTo-PotatoElementInfo $root });
             focusedElement=(ConvertTo-PotatoCompactElement (Get-PotatoForegroundWindowInfo));
+            keyboardFocus=(Get-PotatoNativeInputState);
             elements=@(Get-PotatoCompactElements $tree); limitReached=($remaining.Value -le 0);
             depthBoundaryReached=$depthBoundary.Value;
             hint='Selectors are candidates, not proof of absence. Depth boundaries may hide descendants. Before coordinate fallback, scope a deeper observe to a visible container or select a short label fragment with Name *fragment* and TimeoutMs 0; exact labels can differ. Use click Auto.'}
@@ -1119,6 +1120,7 @@ function Invoke-PotatoObserve {
     [ordered]@{
         working = $workingInfo
         foreground = Get-PotatoForegroundWindowInfo
+        keyboardFocus = Get-PotatoNativeInputState
         windows = @($windows | ForEach-Object { ConvertTo-PotatoElementInfo -Element $_ })
         likelyBlockingWindows = $blocking
         tree = $tree
@@ -1337,7 +1339,11 @@ function Invoke-PotatoClick {
 
     if (-not $ArgsMap.ContainsKey('RequireUnique')) { $ArgsMap.RequireUnique=$true }
     $target = Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
-    if (-not $target.ok) { throw $target.error }
+    if (-not $target.ok) {
+        $failure=New-Object InvalidOperationException($target.error)
+        $failure.Data['PotatoErrorType']='TargetNotFound'; $failure.Data['NoInputSent']=$true
+        throw $failure
+    }
 
     $method = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('Method') -Default 'Auto')
     if ($method -notin @('Auto', 'Mouse', 'Invoke')) { throw 'click -Method must be Auto, Mouse, or Invoke.' }
@@ -1350,8 +1356,10 @@ function Invoke-PotatoClick {
     if ($method -eq 'Invoke' -and -not $target.element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invokePattern)) {
         throw ('InvokePattern is unavailable on this control. Use -Method Auto to choose a supported UIA action or visible mouse click. Supported patterns: ' + ($elementInfo.supportedPatterns -join ', '))
     }
-    $focus = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Focus')) $true
-    $elementFocus = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('ElementFocus')) $true
+    # Invoke/select/toggle do not require refocusing. Focusing the parent or a
+    # popup item first can dismiss menus or change the selection before clicking.
+    $focus = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Focus')) $false
+    $elementFocus = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('ElementFocus')) $false
     $center = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Center')) $false
     $button = Get-PotatoArg -ArgsMap $ArgsMap -Names @('Button') -Default 'Left'
     $offsetX = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('OffsetX')) 0
@@ -1384,6 +1392,21 @@ function Invoke-PotatoClick {
     if (-not $action) {
         if ($elementInfo.isOffscreen -or $elementInfo.boundingRectangle.width -le 0 -or $elementInfo.boundingRectangle.height -le 0) {
             throw 'Mouse click requires a visible, nonempty target rectangle.'
+        }
+        if (-not $ArgsMap.ContainsKey('Focus')) {
+            $node=$target.element
+            for ($i=0;$i -lt 32 -and $node;$i++) {
+                if ($node.Current.NativeWindowHandle) {
+                    Initialize-PotatoWindowIdentity
+                    $targetRoot=[PotatoWindowIdentity]::Root([IntPtr]$node.Current.NativeWindowHandle)
+                    $foreground=[PotatoWindowIdentity]::ForegroundRoot()
+                    if ($targetRoot -ne $foreground -and -not [PotatoWindowIdentity]::IsOwnedBy($targetRoot,$foreground) -and -not [PotatoWindowIdentity]::IsOwnedBy($foreground,$targetRoot)) {
+                        [void](Show-PotatoWindow -Handle $targetRoot.ToInt64())
+                    }
+                    break
+                }
+                $node=[Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
+            }
         }
         if ($relative) { $point = Get-PotatoClickPoint -Element $target.element -RelativeX ([double]$ArgsMap.RelativeX) -RelativeY ([double]$ArgsMap.RelativeY) }
         else { $point = Get-PotatoClickPoint -Element $target.element -Center $center -OffsetX $offsetX -OffsetY $offsetY -OffsetClickablePoint $offsetClickablePoint }
@@ -1533,15 +1556,22 @@ function Invoke-PotatoType {
     if ($expectedFocus -and -not $opaque) { throw 'ExpectedFocusJson is for TargetMode Focused. Writable typing already resolves and focuses its selector.' }
     $hasTargetSelector = @('SelectorJson','PathJson','AutomationId','Name','ControlType','ClassName','Class','WindowTitle') | Where-Object { $ArgsMap.ContainsKey($_) }
     if ($opaque -and ($hasTargetSelector -or $focus -or $preDelete -or $requestedFocusMethod -ne 'Auto')) { throw 'TargetMode Focused preserves existing focus: no selector, Focus, FocusMethod override, or PreDelete. Visibly focus the editor first.' }
-    [void](Get-PotatoWorkingElement -Required)
+    try { [void](Get-PotatoWorkingElement -Required) }
+    catch {
+        if ($opaque) { throw (New-PotatoFocusFailure $_.Exception.Message (Get-PotatoNativeInputState)) }
+        throw
+    }
 
     if ($focus) {
         $working = Get-PotatoWorkingElement
         if ($working) { [void](Show-PotatoWindow -Handle $working.Current.NativeWindowHandle) }
     }
 
-    $element = [System.Windows.Automation.AutomationElement]::FocusedElement
-    if ($expectedFocus) { $element=Wait-PotatoExpectedFocus $expectedFocus (ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('FocusTimeoutMs')) 2000) }
+    $inputFocus=$null
+    if ($opaque) {
+        $inputFocus=Wait-PotatoInputFocus $expectedFocus (ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('FocusTimeoutMs')) 2000)
+        $element=$inputFocus.element
+    } else { $element = [System.Windows.Automation.AutomationElement]::FocusedElement }
     $usedFocusMethod = 'ExistingFocus'
     if ($hasTargetSelector) {
         $target = Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
@@ -1565,8 +1595,8 @@ function Invoke-PotatoType {
     elseif ($requestedFocusMethod -ne 'Auto') { throw 'FocusMethod UIA or Mouse requires an explicit text target selector.' }
     $expectedProcessId = ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('ProcessId')) 0
     if ($expectedProcessId -and $element.Current.ProcessId -ne $expectedProcessId) { throw 'Focused element does not match the requested ProcessId.' }
-    Assert-PotatoTextTarget -Element $element -Text ([string]$text) -AllowOpaque:$opaque
-    Assert-PotatoForegroundInput $element
+    Assert-PotatoTextTarget -Element $element -Text ([string]$text) -AllowOpaque:$opaque -RequireFocus:(-not $opaque)
+    if ($opaque) { Assert-PotatoInputFocusUnchanged $inputFocus } else { Assert-PotatoForegroundInput $element }
     $targetInfo = ConvertTo-PotatoElementInfo $element
     $clearMethod = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('ClearMethod') -Default 'Selection')
     if ($clearMethod -notin @('Selection', 'Shortcut')) { throw 'ClearMethod must be Selection or Shortcut.' }
@@ -1599,7 +1629,7 @@ function Invoke-PotatoType {
         }
     }
 
-    Assert-PotatoForegroundInput $element
+    if ($opaque) { Assert-PotatoInputFocusUnchanged $inputFocus } else { Assert-PotatoForegroundInput $element }
     & $sendText $text $typeByCharacter
     $typedOk = $null
     $verification = $null
@@ -1611,7 +1641,8 @@ function Invoke-PotatoType {
     $script:CurrentState.lastAction = [ordered]@{ command = 'type'; ok = ($typedOk -ne $false); timestamp = (Get-Date).ToString('o') }
     Save-PotatoState -State $script:CurrentState
 
-    [ordered]@{ typed = $true; textLength = ([string]$text).Length; verified = $typedOk; verificationPerformed = $verify; verification = $verification; inputMethod = 'UnicodeKeyboard'; focusMethod = $usedFocusMethod; targetMode=$targetMode; target=$targetInfo; clearMethod = $(if ($preDelete) { $clearMethod } else { $null }) }
+    [ordered]@{ typed = $true; textLength = ([string]$text).Length; verified = $typedOk; verificationPerformed = $verify; verification = $verification; inputMethod = 'UnicodeKeyboard'; focusMethod = $usedFocusMethod; targetMode=$targetMode; target=$targetInfo;
+        inputFocus=$(if ($inputFocus) {@{source=$inputFocus.source;native=$inputFocus.native;waitMs=$inputFocus.waitMs}}); clearMethod = $(if ($preDelete) { $clearMethod } else { $null }) }
 }
 
 function Invoke-PotatoHotkey {
@@ -1939,45 +1970,31 @@ function Invoke-PotatoCloseWindow {
     }
 
     $closed = 0
-    $matchedHandles = @()
-    $matchedProcessIds = @()
+    $requests=@()
     # Close dialogs before their parent; closing the parent first can raise a
     # second warning and strand both windows.
     $windows = @($windows | Sort-Object -Property @{ Expression = {
         try { if (Test-PotatoModalAncestor $_) { 0 } else { 1 } } catch { 1 }
     } })
     foreach ($window in $windows) {
-        $matchedHandles += [int64]$window.Current.NativeWindowHandle
-        $matchedProcessIds += [int]$window.Current.ProcessId
-        try {
+        $handle=[int64]$window.Current.NativeWindowHandle
+        $processId=[int]$window.Current.ProcessId
+        if ($handle) {
+            Initialize-PotatoWindowIdentity
+            [PotatoWindowIdentity]::RequestClose([IntPtr]$handle,$processId)
+            $closed++
+            $requests+=@{nativeWindowHandle=$handle;processId=$processId;method='WM_CLOSE'}
+        } else {
             $pattern = $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
             $pattern.Close()
             $closed++
-        }
-        catch {
-            try {
-                $process = Get-Process -Id $window.Current.ProcessId -ErrorAction Stop
-                if ($process.CloseMainWindow()) { $closed++ }
-            }
-            catch {}
+            $requests+=@{nativeWindowHandle=0;processId=$processId;method='WindowPattern'}
         }
     }
-
-    if ($script:CurrentState.working) {
-        $workingHandle = [int64]$script:CurrentState.working.nativeWindowHandle
-        $workingProcessId = [int]$script:CurrentState.working.processId
-        if (($matchedHandles -contains $workingHandle) -or ($matchedProcessIds -contains $workingProcessId)) {
-            # Close is asynchronous and can raise a save prompt. Keep the owned
-            # identity available for recovery while any of its windows remain.
-            $remaining = @(Get-PotatoTopLevelWindows -Selector @{ProcessId=$workingProcessId} -TimeoutMs 0)
-            if (-not $remaining.Count) {
-                $script:CurrentState.working = $null
-                Save-PotatoState -State $script:CurrentState
-            }
-        }
-    }
-
-    [ordered]@{ closed = $closed; matched = $windows.Count }
+    # Keep identity for asynchronous exit/prompt recovery. The runtime verifies
+    # closure separately; do not block in the provider while the window closes.
+    [ordered]@{ closed = $closed; closeRequested=$closed; matched = $windows.Count; requests=$requests;
+        hint='Close requests were queued. Verify owned windows/process exit and handle any GUI save prompt; closed is the legacy request count, not proof of exit.' }
 }
 
 function Invoke-PotatoReport {
@@ -2120,17 +2137,19 @@ function Invoke-PotatoCliCommandCore {
             $path = Get-PotatoArg -ArgsMap $argsMap -Names @('Path')
             if (-not $path) { throw 'read-pdf requires -Path.' }
             $reader = [string](Get-PotatoArg $argsMap @('Reader') 'Auto')
+            $readTimeout=ConvertTo-PotatoInt (Get-PotatoArg $argsMap @('TimeoutMs')) 5000
+            if ($readTimeout -lt 0 -or $readTimeout -gt 60000) { throw 'PDF TimeoutMs must be 0..60000.' }
             if ($reader -notin @('Auto','Builtin','Python')) { throw 'Reader must be Auto, Builtin, or Python.' }
             $pythonPath = [string](Get-PotatoArg $argsMap @('PythonPath') $env:POTATO_PDF_PYTHON)
             $readerUsed='Builtin'; $builtinError=$null
             if ($reader -ne 'Python') {
-                try { $text = Read-PotatoPdfText -Path $path }
+                try { $text = Read-PotatoPdfText -Path $path -TimeoutMs $readTimeout }
                 catch { $builtinError=$_.Exception.Message; if ($reader -eq 'Builtin' -or -not $pythonPath) { throw } }
             }
             if ($reader -eq 'Python' -or $builtinError) {
                 if (-not $pythonPath -or -not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) { throw 'Python reader needs -PythonPath pointing to an installed Python with pypdf.' }
                 $resolvedPdf=(Get-Item -LiteralPath $path -ErrorAction Stop).FullName
-                $raw = & $pythonPath (Join-Path $PSScriptRoot 'ReadPdf.py') $resolvedPdf 2>&1
+                $raw = & $pythonPath (Join-Path $PSScriptRoot 'ReadPdf.py') $resolvedPdf $readTimeout 2>&1
                 $pythonExit=$LASTEXITCODE
                 $external=($raw -join "`n") | ConvertFrom-Json
                 if ($pythonExit -ne 0 -or -not $external.ok) { throw "PDF Python reader failed: $($external.error)" }
@@ -2206,6 +2225,7 @@ function Invoke-PotatoCliCommandCore {
         if ($_.Exception.Data['PotatoErrorType']) {
             $errorObject.type=$_.Exception.Data['PotatoErrorType']
             $errorObject.candidates=$_.Exception.Data['candidates']
+            if ($_.Exception.Data['focus']) { $errorObject.focus=$_.Exception.Data['focus'] }
             if ($_.Exception.Data['NoInputSent']) { $dispatched=$false }
         }
         if ($script:CurrentState) { try { Write-PotatoLog -Command $normalized -Level Error -Message $errorObject.message } catch {} }

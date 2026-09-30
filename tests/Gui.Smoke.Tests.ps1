@@ -11,7 +11,7 @@ try {
 param($Title,$Output)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @"
+Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing,Accessibility -TypeDefinition @"
 using System.Windows.Forms;
 public class OpaqueInputFixture : Control {
     public string OutputPath;
@@ -20,9 +20,16 @@ public class OpaqueInputFixture : Control {
     protected override void OnMouseDown(MouseEventArgs e) { Focus(); base.OnMouseDown(e); }
     protected override void OnKeyPress(KeyPressEventArgs e) { Received+=e.KeyChar; System.IO.File.WriteAllText(OutputPath,Received); base.OnKeyPress(e); }
 }
+public class MisreportedFocusFixture : OpaqueInputFixture {
+    protected override AccessibleObject CreateAccessibilityInstance() { return new InconsistentFocus(this); }
+    private class InconsistentFocus : ControlAccessibleObject {
+        public InconsistentFocus(Control owner) : base(owner) {}
+        public override AccessibleStates State { get { return base.State & ~AccessibleStates.Focused; } }
+    }
+}
 "@
 $form=New-Object Windows.Forms.Form
-$form.Text=$Title; $form.Width=440; $form.Height=400
+$form.Text=$Title; $form.Width=440; $form.Height=465
 $field=New-Object Windows.Forms.TextBox
 $field.AccessibleName='Fixture input'; $field.Top=20; $field.Left=20; $field.Width=350
 $button=New-Object Windows.Forms.Button
@@ -42,6 +49,17 @@ $modalButton.Add_Click({
     $dialog.Add_Shown({$filename.Focus(); $filename.SelectAll()})
     try { [void]$dialog.ShowDialog($form) } finally { $dialog.Dispose() }
 })
+$closePrompt=New-Object Windows.Forms.Button
+$closePrompt.AccessibleName='Fixture arm close prompt'; $closePrompt.Text='Arm close prompt'; $closePrompt.SetBounds(245,70,145,30)
+$closePrompt.Add_Click({$form.Tag='prompt'})
+$form.Controls.Add($closePrompt)
+$form.Add_FormClosing({
+    if ($form.Tag -eq 'prompt') {
+        $_.Cancel=$true
+        [void][Windows.Forms.MessageBox]::Show($form,'Fixture still has unsaved content.','Fixture close confirmation',[Windows.Forms.MessageBoxButtons]::OK)
+        $form.Tag='ready'
+    }
+})
 $field.TabIndex=0; $button.TabIndex=1; $modalButton.TabIndex=2
 $source=New-Object Windows.Forms.Label
 $source.Text='Drag source'; $source.AccessibleName='Fixture drag source'; $source.SetBounds(20,140,130,50)
@@ -54,6 +72,9 @@ $drop.Add_DragEnter({ $_.Effect=[Windows.Forms.DragDropEffects]::Copy })
 $drop.Add_DragDrop({ [IO.File]::WriteAllText(($Output+'.drop'),[string]$_.Data.GetData([string])); $drop.Text='Dropped' })
 $opaque=New-Object OpaqueInputFixture
 $opaque.AccessibleName='Fixture opaque editor'; $opaque.SetBounds(20,210,350,45); $opaque.OutputPath=$Output+'.opaque'
+$misreported=New-Object MisreportedFocusFixture
+$misreported.AccessibleName='Fixture native focus editor'; $misreported.SetBounds(20,325,350,45); $misreported.OutputPath=$Output+'.native'; $misreported.TabIndex=30
+$form.Controls.Add($misreported)
 $duplicateButton=New-Object Windows.Forms.Button
 $duplicateButton.AccessibleName='Shared action'; $duplicateButton.Text='Shared'; $duplicateButton.SetBounds(20,275,120,30)
 $duplicateButton.Add_Click({[IO.File]::WriteAllText(($Output+'.unique'),'clicked')})
@@ -131,6 +152,14 @@ $form.Show(); $form.Hide()
     Invoke-Fixture type @('-TargetMode','Focused','-Text','Opaque','-FallbackReason','Observed custom canvas has keyboard focus but no writable UIA pattern','-FallbackEvidence','fixture-observation') | Out-Null
     $opaqueWait=Invoke-Fixture wait-file @('-Path',($output+'.opaque'),'-TimeoutMs','3000','-MinBytes','6','-StableMs','100')
     if (-not $opaqueWait.data.conditionMet -or [IO.File]::ReadAllText($output+'.opaque') -cne 'Opaque') { throw 'Focused fallback did not send literal text to the real opaque GUI control.' }
+    Invoke-Fixture click @('-Name','Fixture native focus editor','-Method','Mouse') | Out-Null
+    $nativeObserved=Invoke-Fixture select @('-Name','Fixture native focus editor')
+    if ($nativeObserved.data.elements[0].hasKeyboardFocus) { throw 'Fixture did not reproduce false UIA focus reporting.' }
+    $nativeTyped=Invoke-Fixture type @('-TargetMode','Focused','-ExpectedFocusJson','{"Name":"Fixture native focus editor"}','-Text','Native focus','-FallbackReason','Visible opaque fixture has inconsistent UIA focus','-FallbackEvidence','fixture-native-focus-observation')
+    if ($nativeTyped.data.inputFocus.source -ne 'Win32' -or -not $nativeTyped.data.inputFocus.native.ready) { throw 'Opaque typing did not corroborate focus through Windows.' }
+    Invoke-Fixture press-key @('-Key','Enter','-FallbackReason','Observed opaque multiline fixture accepts Enter','-FallbackEvidence','fixture-native-focus-observation') | Out-Null
+    Invoke-Fixture wait-file @('-Path',($output+'.native'),'-MinBytes','13','-StableMs','100','-TimeoutMs','3000') | Out-Null
+    if ([IO.File]::ReadAllText($output+'.native') -cne "Native focus`r") { throw 'Native focus fallback did not deliver literal text and navigation to the real control.' }
     Invoke-Fixture click @('-Name','Fixture modal opener','-ControlType','Button','-Method','Invoke') | Out-Null
     $compact=Invoke-Fixture observe @('-Scope','FocusedWindow','-Format','Compact','-Depth','4','-MaxElements','40')
     if ($compact.data.root.name -ne 'Fixture modal' -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture cancel'}).Count -ne 1 -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture input'}).Count) { throw 'FocusedWindow compact observation escaped the owned dialog.' }
@@ -170,9 +199,25 @@ $form.Show(); $form.Hide()
         } finally { $original | Set-Content $statePath }
     } $root
     if ($unrelated.ok) { throw 'FocusedWindow accepted a foreground window outside the recorded owner.' }
+    $foreignInput=& $module {param($root)
+        $statePath=Join-Path $root '.state\default.json'
+        $original=Get-Content $statePath -Raw
+        try {
+            $s=$original | ConvertFrom-Json; $s.working.processId=-1; $s.working.nativeWindowHandle=0
+            $s | ConvertTo-Json -Depth 10 | Set-Content $statePath
+            Invoke-PotatoCliCommand type @('-TargetMode','Focused','-Text','wrong owner','-FocusTimeoutMs','0','-FallbackReason','Fixture ownership rejection','-FallbackEvidence','fixture') -CliRoot $root -AsObject
+        } finally { $original | Set-Content $statePath }
+    } $root
+    if ($foreignInput.ok -or $foreignInput.outcome -ne 'not-dispatched' -or $foreignInput.error.focus.owned) {throw 'Native focus fallback bypassed working application ownership.'}
+    Invoke-Fixture click @('-Name','Fixture arm close prompt') | Out-Null
+    $close=Invoke-Fixture close-window @('-ProcessId',"$($child.Id)")
+    if ($close.data.closeRequested -ne 1 -or $close.data.requests[0].method -ne 'WM_CLOSE') {throw 'Close did not return an asynchronous request receipt.'}
+    $confirmation=Invoke-Fixture wait-element @('-Scope','FocusedWindow','-Name','Fixture close confirmation','-ControlType','Window','-TimeoutMs','3000')
+    if (-not $confirmation.data.exists -or $child.HasExited) {throw 'Close suppressed the application confirmation or claimed exit prematurely.'}
+    Invoke-Fixture click @('-Scope','FocusedWindow','-Name','OK','-ControlType','Button') | Out-Null
     Invoke-Fixture close-window @('-ProcessId',"$($child.Id)") | Out-Null
     if (-not $child.WaitForExit(3000)) { throw 'Fixture window did not close.' }
-    'GUI smoke: literal/focused input, relative click, Tab/ShiftTab focus, screenshot directory, visible save, actual selector drag/drop payload, modal discovery, and scoped close passed.'
+    'GUI smoke: literal/focused input, false UIA focus with native keyboard input, foreign-owner rejection, paths, relative click, navigation, drag/drop, modal discovery, asynchronous close prompt and scoped closure passed.'
 }
 finally {
     if ($child -and -not $child.HasExited) { $child.Kill(); $child.WaitForExit() }

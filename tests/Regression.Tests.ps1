@@ -46,7 +46,7 @@ try {
             $watch = [Diagnostics.Stopwatch]::StartNew()
             $result = Invoke-PotatoWaitFile @{Path=$file;TimeoutMs=3000;MinBytes=3;StableMs=400}
             $writer.EndInvoke($pending) | Out-Null
-            Check ($result.conditionMet -and $result.length -eq 3 -and $watch.ElapsedMilliseconds -ge 650) 'Wait did not account for same-size rewrites.'
+            Check ($result.conditionMet -and $result.length -eq 3 -and $watch.ElapsedMilliseconds -ge 650) ('Wait did not account for same-size rewrites: elapsed='+$watch.ElapsedMilliseconds+' result='+($result | ConvertTo-Json -Compress)+' msSinceLastWrite='+([datetime]::UtcNow-[IO.File]::GetLastWriteTimeUtc($file)).TotalMilliseconds)
         }
         finally { $writer.Dispose() }
         $result = Invoke-PotatoWaitFile @{Path=$testRoot;TimeoutMs=0}

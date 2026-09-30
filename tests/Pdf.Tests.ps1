@@ -74,9 +74,33 @@ endcmap
     $expected = 'T' + [char]0xE9 + "st`n" + [char]0x151 + [char]::ConvertFromUtf32(0x1F600) + "`n`nAB C"
     $text = Read-PotatoPdfText -Path $path
     Check (($text -replace "`r`n", "`n") -ceq $expected) 'Page order, stream joining, Unicode maps, or TJ spacing failed.'
+    $incomplete=Join-Path $testRoot 'incomplete.pdf'
+    [IO.File]::WriteAllText($incomplete,([IO.File]::ReadAllText($path,$latin1) -replace '%%EOF\s*$', ''),$latin1)
+    $unfinished=Invoke-PotatoCliCommand read-pdf @('-Path',$incomplete) -AsObject
+    Check (-not $unfinished.ok -and $unfinished.error.message -match 'missing final EOF') 'Shared snapshot accepted an unfinished PDF export.'
     $response = Invoke-PotatoCliCommand read-pdf @('-Path', $path) -CliRoot (Join-Path $testRoot 'unused') -AsObject
     Check ($response.ok -and $response.data.text -ceq $text -and $response.data.path -eq $path) 'JSON/object command differs from the exported reader.'
     Check ($null -eq $response.session -and $null -eq $response.logPath -and -not (Test-Path (Join-Path $testRoot 'unused'))) 'PDF command touched session state.'
+    $writer=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite)
+    try { Check ((Read-PotatoPdfText $path) -ceq $text) 'PDF read conflicted with a cooperating producer retaining its write handle.' }
+    finally { $writer.Dispose() }
+    $ready=New-Object Threading.ManualResetEvent($false)
+    $worker=[powershell]::Create()
+    [void]$worker.AddScript({param($path,$ready)
+        $lock=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+        try { [void]$ready.Set(); Start-Sleep -Milliseconds 400 } finally {$lock.Dispose()}
+    }).AddArgument($path).AddArgument($ready)
+    $pending=$worker.BeginInvoke()
+    try {
+        Check ($ready.WaitOne(5000)) 'PDF lock fixture did not become ready.'
+        Check ((Read-PotatoPdfText $path -TimeoutMs 2000) -ceq $text) 'Transient exclusive PDF lock was not retried.'
+    } finally { $worker.EndInvoke($pending) | Out-Null; $worker.Dispose(); $ready.Dispose() }
+    $lock=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+    try {
+        $watch=[Diagnostics.Stopwatch]::StartNew()
+        $locked=Invoke-PotatoCliCommand read-pdf @('-Path',$path,'-TimeoutMs','150') -AsObject
+        Check (-not $locked.ok -and $locked.error.message -match 'locked or changing' -and $watch.ElapsedMilliseconds -lt 2500) 'Persistent PDF lock did not fail within the configured read deadline.'
+    } finally { $lock.Dispose() }
     $json = @(& (Join-Path $cliRoot 'potato.ps1') read-pdf -Path $path)
     Check ($json.Count -eq 1 -and ($json[0] | ConvertFrom-Json).data.text -ceq $text) 'Entry point must write exactly one JSON response.'
     $help = & (Join-Path $cliRoot 'potato.ps1') help -Topic read-pdf | ConvertFrom-Json

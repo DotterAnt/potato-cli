@@ -63,7 +63,11 @@ $module=Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -Pa
     $found=@(Find-PotatoElement -Selector @{Name='Ready control'} -Parent $stale -TimeoutMs 1000 -FindFirst -RefreshFocusedParent)
     Check ($found.Count -eq 1 -and $script:focusReads -eq 1) 'FocusedWindow wait remained stuck on the previous foreground root.'
     $script:focusReads=0
-    function Get-PotatoFocusedElement { $script:focusReads++; if ($script:focusReads -eq 1) { throw 'Transient focus provider failure' }; [pscustomobject]@{ready=($script:focusReads -gt 2)} }
+    function Get-PotatoInputFocus {
+        $script:focusReads++
+        if ($script:focusReads -eq 1) { throw 'Transient focus provider failure' }
+        @{ready=$true;native=@{};candidates=@([pscustomobject]@{ready=($script:focusReads -gt 2);Current=@{HasKeyboardFocus=$true}})}
+    }
     function Test-PotatoElementMatch { param($Element,$Selector) return $Element.ready }
     function Assert-PotatoForegroundInput { }
     $ready=Wait-PotatoExpectedFocus '{"AutomationId":"field"}' 1000
