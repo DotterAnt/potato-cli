@@ -36,6 +36,45 @@ public static class PotatoLiteralInput {
             scan=(ushort)(control ? 0 : value), flags=(control ? 0u : 4u) | (up ? 2u : 0u)
         } } };
     }
+    static Input VirtualKey(ushort key, bool up) {
+        return new Input { type=1, value=new InputUnion { keyboard=new KeyboardInput {
+            key=key, flags=(key>=0x25 && key<=0x28 ? 1u : 0u) | (up ? 2u : 0u)
+        } } };
+    }
+    public static void SendNavigation(string name, long foregroundHandle, long focusHandle) {
+        ushort key;
+        switch ((name ?? "").ToLowerInvariant()) {
+            case "tab": case "shifttab": key=9; break;
+            case "enter": key=13; break;
+            case "escape": key=27; break;
+            case "left": key=0x25; break;
+            case "up": key=0x26; break;
+            case "right": key=0x27; break;
+            case "down": key=0x28; break;
+            default: throw new ArgumentException("Unsupported navigation key.");
+        }
+        var info=new GuiThreadInfo {size=(uint)Marshal.SizeOf(typeof(GuiThreadInfo))};
+        if (foregroundHandle==0 || focusHandle==0 || GetForegroundWindow().ToInt64()!=foregroundHandle ||
+            !GetGUIThreadInfo(0,ref info) || info.focus.ToInt64()!=focusHandle || !IsWindowEnabled(info.focus)) {
+            var failure=new InvalidOperationException("Keyboard target changed before navigation. No input was sent.");
+            failure.Data["PotatoErrorType"]="InputFocusChanged"; failure.Data["NoInputSent"]=true;
+            throw failure;
+        }
+        bool shift=String.Equals(name,"ShiftTab",StringComparison.OrdinalIgnoreCase);
+        var inputs=shift ? new[]{VirtualKey(0x10,false),VirtualKey(key,false),VirtualKey(key,true),VirtualKey(0x10,true)} :
+            new[]{VirtualKey(key,false),VirtualKey(key,true)};
+        uint sent=SendInput((uint)inputs.Length,inputs,Marshal.SizeOf(typeof(Input)));
+        if (sent!=inputs.Length) {
+            int error=Marshal.GetLastWin32Error();
+            // Best-effort release after partial insertion, never repeat the action.
+            if (sent>0) {
+                var releases=shift ? new[]{VirtualKey(key,true),VirtualKey(0x10,true)} : new[]{VirtualKey(key,true)};
+                SendInput((uint)releases.Length,releases,Marshal.SizeOf(typeof(Input)));
+            }
+            var failure=new Win32Exception(error,"Navigation input was incomplete; observe before retrying.");
+            failure.Data["NoInputSent"]=sent==0; throw failure;
+        }
+    }
     public static void SendText(string text) {
         var info=new GuiThreadInfo {size=(uint)Marshal.SizeOf(typeof(GuiThreadInfo))};
         if (!GetGUIThreadInfo(0,ref info)) throw new InvalidOperationException("Cannot confirm keyboard focus before typing.");

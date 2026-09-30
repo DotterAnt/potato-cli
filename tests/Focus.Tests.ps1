@@ -36,5 +36,19 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
         }
         Check ($invalid.Data['PotatoErrorType'] -eq 'InvalidText' -and $invalid.Data['NoInputSent']) 'Malformed Unicode was not rejected before dispatch.'
     }
+    Reject {[PotatoLiteralInput]::SendNavigation('F12',0,0)} 'Navigation backend accepted an application shortcut.'
+    Reject {[PotatoLiteralInput]::SendNavigation('Escape',0,0)} 'Navigation backend accepted missing foreground identity.'
+    function Get-PotatoWorkingElement { $canvas }
+    function Wait-PotatoInputFocus {
+        @{element=$canvas;native=@{foregroundHandle=$(if ($script:sent -gt 0) {303} else {101});focusHandle=202}}
+    }
+    function Assert-PotatoInputFocusUnchanged { }
+    function ConvertTo-PotatoElementInfo { @{name='Fixture focus'} }
+    function Get-PotatoFocusedElement { $canvas }
+    function Send-PotatoNavigationKey { $script:sent++ }
+    $script:sent=0
+    $changed=$null
+    try { Invoke-PotatoPressKey @{Key='Down';Count=3} | Out-Null } catch { $changed=$_.Exception }
+    Check ($script:sent -eq 1 -and $changed.Data['PotatoErrorType'] -eq 'InputFocusChanged' -and $changed.Data['NoInputSent'] -eq $false) 'Repeated navigation continued into a new modal or claimed no input after the first key.'
     "Focus checks: $script:checks passed"
 }

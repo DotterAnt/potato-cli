@@ -28,6 +28,28 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     Check ($errorValue.Data['PotatoErrorType'] -eq 'AmbiguousTarget') 'Fallback ambiguity was not structured.'
     $errorValue=Reject {Find-PotatoObservedTreeMatches $dupes @{Name='Observed target'} -NodeLimit 1} 'Partial fallback claimed complete uniqueness.'
     Check ($errorValue.Data['PotatoErrorType'] -eq 'SearchIncomplete' -and $errorValue.Data['NoInputSent']) 'Traversal bound did not fail before input.'
+    $alias=New-Node 'Aliased menu entry'
+    $alias | Add-Member ScriptMethod GetRuntimeId { @(42,123,1) }
+    $secondWrapper=New-Node 'Aliased menu entry'
+    $secondWrapper | Add-Member ScriptMethod GetRuntimeId { @(42,123,1) }
+    $distinct=New-Node 'Aliased menu entry'
+    $distinct | Add-Member ScriptMethod GetRuntimeId { @(42,123,2) }
+    $aliasRoot=New-Node 'Scope' @($alias,$secondWrapper,$distinct)
+    $found=@(Find-PotatoElement -Parent $aliasRoot -Selector @{Name='Aliased menu entry'} -TimeoutMs 0)
+    Check ($found.Count -eq 2) 'Traversal failed to collapse identical UIA runtime identities or merged distinct controls.'
+    $aliasRoot | Add-Member ScriptMethod FindAll {param($scope,$condition) $this.children} -Force
+    $found=@(Find-PotatoElement -Parent $aliasRoot -Selector @{Name='Aliased menu entry'} -TimeoutMs 0 -MaxResults 2)
+    Check ($found.Count -eq 2 -and $found[1] -eq $distinct) 'Filtered provider duplicates consumed the unique result limit.'
+    $aliasRoot.children=@($alias,$secondWrapper)
+    $found=@(Find-PotatoElement -Parent $aliasRoot -Selector @{Name='Aliased menu entry'} -TimeoutMs 0)
+    Assert-PotatoUniqueMatches $found
+    Check ($found.Count -eq 1) 'Two references to one control were considered ambiguous.'
+    $alias.children=@($alias)
+    $cycle=Find-PotatoObservedTreeMatches $aliasRoot @{Name='Missing'} -BudgetMs 1000
+    Check ($cycle.complete -and -not $cycle.matches.Count) 'Repeated runtime identity was traversed in a cycle.'
+    $remaining=20;$boundary=$false
+    $tree=ConvertTo-PotatoTreeNode $aliasRoot -Depth 8 -Remaining ([ref]$remaining) -DepthBoundaryReached ([ref]$boundary)
+    Check ($tree.children.Count -eq 1 -and -not $tree.children[0].children.Count -and -not $boundary) 'Observation duplicated or recursively traversed the same provider identity.'
     $root.Current.ProcessId=0
     $found=@(Find-PotatoElement -Parent $root -Selector @{Name='Observed target'} -TimeoutMs 0)
     Check (-not $found.Count) 'Fallback traversed the entire desktop.'

@@ -179,20 +179,34 @@ function Invoke-PotatoPressKey {
     # focus from a menu or modal dialog.
     if (-not $script:InputScope) { [void](Get-PotatoWorkingElement -Required) }
     $before = $null
+    $initialFocus = $null
     for ($i=0; $i -lt $count; $i++) {
         try {
             $inputFocus=Wait-PotatoInputFocus (Get-PotatoArg $ArgsMap @('ExpectedFocusJson')) (ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('FocusTimeoutMs')) 2000)
             $focused=$inputFocus.element
             Assert-PotatoInputFocusUnchanged $inputFocus
+            if ($i -eq 0) { $initialFocus=$inputFocus.native }
+            elseif ($inputFocus.native.foregroundHandle -ne $initialFocus.foregroundHandle -or
+                ($key -in @('Left','Right','Up','Down') -and $inputFocus.native.focusHandle -ne $initialFocus.focusHandle)) {
+                throw (New-PotatoFocusFailure 'Navigation changed its window or arrow-key target. Remaining keys were not sent; inspect the new state.' $inputFocus.native 'InputFocusChanged')
+            }
+            if ($i -eq 0) { $before = ConvertTo-PotatoElementInfo $focused }
+            Send-PotatoNavigationKey $key $inputFocus.native
         } catch {
             if ($i -gt 0) { $_.Exception.Data['NoInputSent']=$false }
             throw
         }
-        if ($i -eq 0) { $before = ConvertTo-PotatoElementInfo $focused }
-        [System.Windows.Forms.SendKeys]::SendWait($keys[$key])
+        # Allow the GUI to consume queued input before checking the next target.
+        Start-Sleep -Milliseconds 30
     }
-    $after = [System.Windows.Automation.AutomationElement]::FocusedElement
+    $after = Get-PotatoFocusedElement
     [ordered]@{ sent=$true; key=$key; count=$count; before=$before; after=$(if ($after) { ConvertTo-PotatoElementInfo $after }); verified=$null; verificationPerformed=$false }
+}
+
+function Send-PotatoNavigationKey {
+    param([string]$Key,$Native)
+    Initialize-PotatoWindowIdentity
+    [PotatoLiteralInput]::SendNavigation($Key,$Native.foregroundHandle,$Native.focusHandle)
 }
 
 function Test-PotatoModalAncestor {

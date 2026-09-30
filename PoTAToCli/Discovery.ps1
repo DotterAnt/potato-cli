@@ -60,12 +60,26 @@ function Get-PotatoExplicitScope {
     return $null
 }
 
+function Get-PotatoElementIdentityKey {
+    param($Element)
+    # UIA runtime identity, never matching labels/rectangles. Distinct controls
+    # with identical appearance must still fail the uniqueness check.
+    try {
+        $id=@($Element.GetRuntimeId())
+        if ($id.Count) { return ($id -join ',') }
+    } catch { }
+    return $null
+}
+
 function Find-PotatoObservedTreeMatches {
     param($Parent,$Selector,[bool]$Recurse=$true,[int]$MaxResults=0,[int]$NodeLimit=1500,[int]$BudgetMs=1500)
     # Match through the same unfiltered child traversal used by observe. Some
     # hybrid providers omit descendants only when a search predicate is pushed down.
     $queue=New-Object Collections.Queue
     $queue.Enqueue(@{element=$Parent;depth=0})
+    $seen=New-Object 'Collections.Generic.HashSet[string]'
+    $identity=Get-PotatoElementIdentityKey $Parent
+    if ($identity) { [void]$seen.Add($identity) }
     $watch=[Diagnostics.Stopwatch]::StartNew(); $visited=0; $found=@()
     $complete=$true
     while ($queue.Count) {
@@ -74,6 +88,8 @@ function Find-PotatoObservedTreeMatches {
         try { $children=$node.element.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition) }
         catch { $complete=$false;continue }
         foreach ($child in $children) {
+            $identity=Get-PotatoElementIdentityKey $child
+            if ($identity -and -not $seen.Add($identity)) { continue }
             $visited++
             if ($visited -gt $NodeLimit -or $watch.ElapsedMilliseconds -ge $BudgetMs) {$complete=$false;break}
             try { $matches=Test-PotatoElementMatch $child $Selector } catch { $complete=$false;continue }
@@ -139,7 +155,11 @@ function Assert-PotatoUniqueMatches {
     $failure=New-Object InvalidOperationException('Ambiguous target: multiple visible enabled controls match. Use the returned candidates to add an observed ID, role, class or parent scope. No input was sent.')
     $failure.Data['PotatoErrorType']='AmbiguousTarget'
     $failure.Data['NoInputSent']=$true
-    $failure.Data['candidates']=@($Matches | ForEach-Object { ConvertTo-PotatoCompactElement (ConvertTo-PotatoElementInfo $_) })
+    $failure.Data['candidates']=@($Matches | ForEach-Object {
+        $candidate=ConvertTo-PotatoCompactElement (ConvertTo-PotatoElementInfo $_)
+        $candidate.runtimeId=Get-PotatoElementIdentityKey $_
+        $candidate
+    })
     throw $failure
 }
 

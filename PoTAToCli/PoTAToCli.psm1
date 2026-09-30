@@ -39,6 +39,23 @@ function Initialize-PotatoAutomationTypes {
     if (-not ('System.Windows.Automation.AutomationElement' -as [type])) {
         Add-Type -AssemblyName @('UIAutomationClient', 'UIAutomationTypes')
     }
+    if (-not $script:StandardProvidersRegistered) {
+        # PowerShell's assembly loading can leave the managed default proxy table
+        # empty: native Edit/ComboBox/menu controls then appear as opaque Panes.
+        Add-Type -AssemblyName UIAutomationClientsideProviders
+        $providers=[UIAutomationClientsideProviders.UIAutomationClientSideProviders]::ClientSideProviderDescriptionTable
+        try { [System.Windows.Automation.ClientSettings]::RegisterClientSideProviders($providers) }
+        catch {
+            # .NET Framework's first LoadDefaultProxies can dereference the
+            # absent entry assembly in a PowerShell host. Retry that one lazy-
+            # initialization failure; all other registration errors stay fatal.
+            $cause=$_.Exception
+            while ($cause.InnerException) { $cause=$cause.InnerException }
+            if ($cause -isnot [NullReferenceException] -or $cause.StackTrace -notmatch 'ProxyManager.LoadDefaultProxies') { throw }
+            [System.Windows.Automation.ClientSettings]::RegisterClientSideProviders($providers)
+        }
+        $script:StandardProvidersRegistered=$true
+    }
     if (-not ('System.Windows.Forms.Cursor' -as [type])) {
         Add-Type -AssemblyName System.Windows.Forms
     }
@@ -568,6 +585,7 @@ function Find-PotatoElement {
 
     do {
         $matches = @()
+        $seen=New-Object 'Collections.Generic.HashSet[string]'
         try {
             if ($RefreshWorkingParent -and $attempt -gt 0) {
                 $Parent = Get-PotatoWorkingElement
@@ -581,11 +599,15 @@ function Find-PotatoElement {
             $attempt++
             if ($IncludeRoot -and (Test-PotatoElementMatch -Element $Parent -Selector $Selector)) {
                 $matches=@($Parent)
+                $identity=Get-PotatoElementIdentityKey $Parent
+                if ($identity) { [void]$seen.Add($identity) }
                 if ($firstOnly -or $MaxResults -eq 1) { return ,$Parent }
             }
             if ($firstOnly -and $exact) { $collection = @($Parent.FindFirst($scope, $condition)) | Where-Object { $null -ne $_ } }
             else { $collection = $Parent.FindAll($scope, $condition) }
             foreach ($element in $collection) {
+                $identity=Get-PotatoElementIdentityKey $element
+                if ($identity -and -not $seen.Add($identity)) { continue }
                 try { $matched = Test-PotatoElementMatch -Element $element -Selector $Selector } catch { continue }
                 if ($matched) {
                     $matches += $element
@@ -1085,9 +1107,13 @@ function ConvertTo-PotatoTreeNode {
         [int] $Depth = 2,
 
         [ref] $Remaining,
-        [ref] $DepthBoundaryReached
+        [ref] $DepthBoundaryReached,
+        [Collections.Generic.HashSet[string]] $Seen
     )
 
+    if ($null -eq $Seen) { $Seen=New-Object 'Collections.Generic.HashSet[string]' }
+    $identity=Get-PotatoElementIdentityKey $Element
+    if ($identity -and -not $Seen.Add($identity)) { return $null }
     if ($Remaining.Value -le 0) { return $null }
     $Remaining.Value--
     $info = ConvertTo-PotatoElementInfo -Element $Element
@@ -1105,7 +1131,7 @@ function ConvertTo-PotatoTreeNode {
         $children = $Element.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
         foreach ($child in $children) {
             if ($Remaining.Value -le 0) { break }
-            $childNode = ConvertTo-PotatoTreeNode -Element $child -Depth ($Depth - 1) -Remaining $Remaining -DepthBoundaryReached $DepthBoundaryReached
+            $childNode = ConvertTo-PotatoTreeNode -Element $child -Depth ($Depth - 1) -Remaining $Remaining -DepthBoundaryReached $DepthBoundaryReached -Seen $Seen
             if ($childNode) { $node.children += $childNode }
         }
     }
@@ -2261,7 +2287,7 @@ function Invoke-PotatoCliCommandCore {
             $previousDpi=[PotatoWindowIdentity]::EnterPhysicalCoordinates()
         }
         Initialize-PotatoEnvironment -CliRoot $CliRoot
-        if ($normalized -in @('type','press-key') -and (Get-PotatoArg $argsMap @('Scope')) -eq 'ForegroundWindow') {
+        if ($normalized -in @('type','press-key','observe') -and (Get-PotatoArg $argsMap @('Scope')) -eq 'ForegroundWindow') {
             $scopeRoot=Get-PotatoGuardedForegroundWindow (Get-PotatoArg $argsMap @('WindowSelectorJson'))
             $script:InputScope=@{processId=$scopeRoot.Current.ProcessId;nativeWindowHandle=$scopeRoot.Current.NativeWindowHandle;windowScoped=$true}
         }
