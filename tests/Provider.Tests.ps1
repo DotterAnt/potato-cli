@@ -34,6 +34,29 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     $script:CurrentState=@{}
     $result=Invoke-PotatoClick @{Name='Choice'}
     Check ($result.clicked -and $result.action -eq 'SelectionItemPattern') 'Default semantic click changed focus before selecting a popup item.'
+    $script:mouseClicks=0
+    $script:semanticClicks=0
+    $script:info=@{isEnabled=$true;isOffscreen=$false;controlType='Button';nativeWindowHandle=123;
+        supportedPatterns=@('Invoke');boundingRectangle=@{width=80;height=25}}
+    function ConvertTo-PotatoElementInfo { $script:info }
+    function Invoke-PotatoElementDefaultAction { $script:semanticClicks++; 'InvokePattern' }
+    function Get-PotatoClickPoint { @{x=20;y=20} }
+    function Move-PotatoMouse { }
+    function Invoke-PotatoMouseClick { $script:mouseClicks++ }
+    $result=Invoke-PotatoClick @{Name='Any native push button';Focus=$false}
+    Check ($result.action -eq 'Mouse' -and $script:mouseClicks -eq 1 -and $script:semanticClicks -eq 0) 'Auto invoked a native button synchronously before falling back to mouse.'
+    $script:info.nativeWindowHandle=0
+    $result=Invoke-PotatoClick @{Name='Windowless action';Focus=$false}
+    Check ($result.action -eq 'InvokePattern' -and $script:semanticClicks -eq 1 -and $script:mouseClicks -eq 1) 'Windowless UIA action lost its semantic activation.'
+    $script:info.nativeWindowHandle=123;$script:info.controlType='MenuItem'
+    $result=Invoke-PotatoClick @{Name='Menu action';Focus=$false}
+    Check ($result.action -eq 'InvokePattern' -and $script:semanticClicks -eq 2 -and $script:mouseClicks -eq 1) 'Menu item was incorrectly classified as a native push button.'
+    $script:info.controlType='Button'
+    $pattern=[pscustomobject]@{}
+    $pattern | Add-Member ScriptMethod Invoke {$script:semanticClicks++}
+    $fake | Add-Member ScriptMethod TryGetCurrentPattern {param($id,$value) $value.Value=$pattern; return $true}
+    $result=Invoke-PotatoClick @{Name='Explicit action';Focus=$false;Method='Invoke'}
+    Check ($result.action -eq 'InvokePattern' -and $script:semanticClicks -eq 3 -and $script:mouseClicks -eq 1) 'Explicit Invoke was silently replaced or double-dispatched.'
     function Resolve-PotatoCommandTarget { @{ok=$false;error='Fixture target absent'} }
     $failure=$null
     try {Invoke-PotatoClick @{Name='Absent'} | Out-Null} catch {$failure=$_.Exception}

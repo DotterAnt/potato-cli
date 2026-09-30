@@ -20,6 +20,7 @@ public class NativeControlFixture : Form {
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern IntPtr CreateWindowExW(int ex,string cls,string text,uint style,int x,int y,int w,int h,IntPtr parent,IntPtr id,IntPtr instance,IntPtr param);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern IntPtr SendMessageW(IntPtr h,uint msg,IntPtr param,string text);
     [DllImport("user32.dll")] static extern IntPtr GetFocus();
+    [DllImport("user32.dll")] static extern uint InSendMessageEx(IntPtr reserved);
     public IntPtr Combo;
     public string Output;
     public NativeControlFixture() { Width=390; Height=240; }
@@ -35,11 +36,14 @@ public class NativeControlFixture : Form {
         Combo=CreateWindowExW(0,"ComboBox","",0x50210003,20,30,280,130,Handle,new IntPtr(101),IntPtr.Zero,IntPtr.Zero);
         foreach (string s in new[]{"Alpha choice","Beta choice","Gamma choice"}) SendMessageW(Combo,0x143,IntPtr.Zero,s);
         SendMessageW(Combo,0x14e,IntPtr.Zero,null);
+        CreateWindowExW(0,"Button","Native action",0x50010000,175,110,130,30,Handle,new IntPtr(102),IntPtr.Zero,IntPtr.Zero);
     }
     protected override void WndProc(ref Message m) {
         base.WndProc(ref m);
         if (m.Msg==0x111 && (m.WParam.ToInt64() & 0xffff)==101 && ((m.WParam.ToInt64() >> 16) & 0xffff)==1)
             System.IO.File.WriteAllText(Output,SendMessageW(Combo,0x147,IntPtr.Zero,null).ToInt64().ToString());
+        if (m.Msg==0x111 && (m.WParam.ToInt64() & 0xffff)==102 && ((m.WParam.ToInt64() >> 16) & 0xffff)==0)
+            System.IO.File.AppendAllText(Output+".activation",InSendMessageEx(IntPtr.Zero).ToString()+"\n");
     }
 }
 "@
@@ -81,6 +85,15 @@ $form.Show();$form.Hide()
         return $false
     }
     Invoke-Fixture focus @('-ProcessId',"$($child.Id)",'-WindowTitle',$title,'-TimeoutMs','10000') | Out-Null
+    # A native action can make COM calls in its handler, as file dialogs do.
+    # Verify Auto avoids a cross-thread synchronous message, without simulating
+    # a successful save or relying on any application-specific button name.
+    $nativeClick=Invoke-Fixture click @('-AutomationId','102')
+    $activationPath=$output+'.activation'
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    while (-not (Test-Path -LiteralPath $activationPath) -and $watch.ElapsedMilliseconds -lt 2000) {Start-Sleep -Milliseconds 30}
+    $activations=@(Get-Content -LiteralPath $activationPath)
+    Check ($activations.Count -eq 1 -and $activations[0] -eq '0' -and $nativeClick.data.action -eq 'Mouse') ('Native Auto activation used an input-synchronous call or clicked twice: '+($activations -join ','))
     $combo=Invoke-Fixture select @('-AutomationId','101','-ControlType','ComboBox')
     Check ($combo.data.count -eq 1 -and $combo.data.elements[0].supportedPatterns -contains 'ExpandCollapse') 'Standard native ComboBox still appears as an opaque Pane.'
     $opened=Invoke-Fixture click @('-AutomationId','101')

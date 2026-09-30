@@ -158,7 +158,7 @@ $form.Show(); $form.Hide()
     Invoke-Fixture screenshot @('-Name','Fixture input','-OutFile',$shotPath) | Out-Null
     if (-not (Test-Path $shotPath)) { throw 'Screenshot did not create its destination directory.' }
     $saveClick=Invoke-Fixture click @('-Name','Fixture save','-ControlType','Button','-Method','Auto')
-    if ($saveClick.data.action -ne 'InvokePattern') { throw 'Auto did not use the supported UIA action.' }
+    if ($saveClick.data.action -ne 'Mouse') { throw 'Auto did not use physical input for the native push button.' }
     $wait=Invoke-Fixture wait-file @('-Path',$output,'-TimeoutMs','3000','-MinBytes','1','-StableMs','100')
     if (-not $wait.data.conditionMet -or [IO.File]::ReadAllText($output) -cne $literal) { throw 'Visible save button did not persist literal content.' }
     $drag=Invoke-Fixture drag @('-SourceSelectorJson','{"Name":"Fixture drag source"}','-TargetSelectorJson','{"Name":"Fixture drop target"}','-DurationMs','350')

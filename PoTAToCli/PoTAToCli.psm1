@@ -1430,6 +1430,11 @@ function Invoke-PotatoClick {
     # Read evidence before acting: invoking a dialog button may destroy it.
     $elementInfo = ConvertTo-PotatoElementInfo -Element $target.element
     if (-not $elementInfo.isEnabled) { throw 'The target element is disabled.' }
+    # Win32 button proxies invoke via synchronous BM_CLICK. A handler that calls
+    # COM (for example a common file dialog) can then fail with 0x8001010D.
+    # Choose physical input BEFORE dispatch, by control semantics, never caption.
+    $nativeButton = $elementInfo.controlType -eq 'Button' -and $elementInfo.nativeWindowHandle -and
+        $elementInfo.supportedPatterns -contains 'Invoke'
     # Validate explicit Invoke BEFORE SetFocus: focusing a list item can select
     # it, so a rejected method must not silently change the application state.
     $invokePattern = $null
@@ -1466,7 +1471,7 @@ function Invoke-PotatoClick {
         $invokePattern.Invoke()
         $action = 'InvokePattern'
     }
-    elseif ($method -eq 'Auto' -and $button -eq 'Left' -and $offsetX -eq 0 -and $offsetY -eq 0 -and -not $center -and -not $relative) {
+    elseif ($method -eq 'Auto' -and -not $nativeButton -and $button -eq 'Left' -and $offsetX -eq 0 -and $offsetY -eq 0 -and -not $center -and -not $relative) {
         $action = Invoke-PotatoElementDefaultAction -Element $target.element
     }
     $point = $null
