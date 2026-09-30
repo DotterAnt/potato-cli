@@ -114,10 +114,26 @@ $form.Show(); $form.Hide()
     $opaqueWait=Invoke-Fixture wait-file @('-Path',($output+'.opaque'),'-TimeoutMs','3000','-MinBytes','6','-StableMs','100')
     if (-not $opaqueWait.data.conditionMet -or [IO.File]::ReadAllText($output+'.opaque') -cne 'Opaque') { throw 'Focused fallback did not send literal text to the real opaque GUI control.' }
     Invoke-Fixture click @('-Name','Fixture modal opener','-ControlType','Button','-Method','Invoke') | Out-Null
+    $compact=Invoke-Fixture observe @('-Scope','FocusedWindow','-Format','Compact','-Depth','4','-MaxElements','40')
+    if ($compact.data.root.name -ne 'Fixture modal' -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture cancel'}).Count -ne 1 -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture input'}).Count) { throw 'FocusedWindow compact observation escaped the owned dialog.' }
+    $scoped=Invoke-Fixture select @('-Scope','FocusedWindow','-Name','Fixture cancel','-TimeoutMs','0')
+    if ($scoped.data.count -ne 1) { throw 'FocusedWindow select did not find the dialog control.' }
     $modal=Invoke-Fixture select @('-Name','Fixture cancel','-ControlType','Button','-ProcessId',"$($child.Id)",'-ModalOnly','-TimeoutMs','2000')
     if ($modal.data.count -ne 1) { throw 'Modal selector did not cross the parent window boundary.' }
     $windows=Invoke-Fixture windows @('-ProcessId',"$($child.Id)")
     if (@($windows.data.windows | Where-Object {$_.isModal}).Count -ne 1) { $windows.data.windows | ConvertTo-Json -Depth 8; throw 'Modal window was not identified.' }
+    Invoke-Fixture click @('-Scope','FocusedWindow','-Name','Fixture cancel') | Out-Null
+    $unrelated=& $module {param($root)
+        $statePath=Join-Path $root '.state\default.json'
+        $original=Get-Content $statePath -Raw
+        try {
+            $s=$original | ConvertFrom-Json
+            $s.working.processId=-1; $s.working.nativeWindowHandle=0
+            $s | ConvertTo-Json -Depth 10 | Set-Content $statePath
+            Invoke-PotatoCliCommand observe @('-Scope','FocusedWindow','-Format','Compact') -CliRoot $root -AsObject
+        } finally { $original | Set-Content $statePath }
+    } $root
+    if ($unrelated.ok) { throw 'FocusedWindow accepted a foreground window outside the recorded owner.' }
     Invoke-Fixture close-window @('-ProcessId',"$($child.Id)") | Out-Null
     if (-not $child.WaitForExit(3000)) { throw 'Fixture window did not close.' }
     'GUI smoke: literal/focused input, relative click, Tab/ShiftTab focus, screenshot directory, visible save, actual selector drag/drop payload, modal discovery, and scoped close passed.'

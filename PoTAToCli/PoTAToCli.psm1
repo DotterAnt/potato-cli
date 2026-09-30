@@ -1,5 +1,6 @@
 ﻿. (Join-Path $PSScriptRoot 'Interaction.ps1')
 . (Join-Path $PSScriptRoot 'Pdf.ps1')
+. (Join-Path $PSScriptRoot 'Discovery.ps1')
 $script:CliRoot = $null
 $script:StateRoot = $null
 $script:StatePath = $null
@@ -521,7 +522,8 @@ function Find-PotatoElement {
         [int] $TimeoutMs = -1,
 
         [switch] $FindFirst,
-        [int] $MaxResults = 0
+        [int] $MaxResults = 0,
+        [switch] $RefreshWorkingParent
     )
 
     if (-not $Parent) {
@@ -548,10 +550,19 @@ function Find-PotatoElement {
         if (@($Selector.$field | Where-Object { "$_" -match '[\*\?\[]' }).Count) { $exact=$false }
     }
     $stopAt = (Get-Date).AddMilliseconds($effectiveTimeout)
+    $attempt = 0
 
     do {
         $matches = @()
         try {
+            if ($RefreshWorkingParent -and $attempt -gt 0) {
+                $Parent = Get-PotatoWorkingElement
+                if (-not $Parent) {
+                    if ((Get-Date) -lt $stopAt) { Start-Sleep -Milliseconds 100 }
+                    continue
+                }
+            }
+            $attempt++
             if ($firstOnly -and $exact) { $collection = @($Parent.FindFirst($scope, $condition)) | Where-Object { $null -ne $_ } }
             else { $collection = $Parent.FindAll($scope, $condition) }
             foreach ($element in $collection) {
@@ -701,6 +712,15 @@ function Set-PotatoWorkingWindow {
     )
 
     $info = ConvertTo-PotatoElementInfo -Element $Element
+    # A splash/provider can disappear between discovery and property reads.
+    # Never persist a partially read identity, even when other properties exist.
+    if (-not $info.processId -or [int]$info.processId -le 0 -or -not $info.nativeWindowHandle) {
+        throw 'Window identity became unavailable before activation. Rediscover the owned window.'
+    }
+    Initialize-PotatoWindowIdentity
+    if ([PotatoWindowIdentity]::ProcessId([IntPtr][int64]$info.nativeWindowHandle) -ne [int]$info.processId) {
+        throw 'Window handle and process identity changed before activation. Rediscover the owned window.'
+    }
     if (-not $Process -and $info.processId) {
         try { $Process = Get-Process -Id $info.processId -ErrorAction Stop } catch {}
     }
@@ -897,18 +917,25 @@ function Invoke-PotatoStart {
     # text-input target of this successful launch command.
     $script:CurrentState.working = $null
     Save-PotatoState -State $script:CurrentState
-    $window = Wait-PotatoProcessWindow -Process $started -TimeoutMs $timeoutMs -ExpectedProcessName $targetProcessName -ExcludedProcessIds $existingIds -LaunchedAt $launchedAt
+    $launchWatch = [Diagnostics.Stopwatch]::StartNew()
+    $window = $null
     $working = $null
-    if ($window) {
-        $working = Set-PotatoWorkingWindow -Element $window
-        [void](Show-PotatoWindow -Handle $working.nativeWindowHandle -Maximize:$maximize)
-    }
+    do {
+        $remainingMs = [int][Math]::Max(0, $timeoutMs - $launchWatch.ElapsedMilliseconds)
+        $candidate = Wait-PotatoProcessWindow -Process $started -TimeoutMs $remainingMs -ExpectedProcessName $targetProcessName -ExcludedProcessIds $existingIds -LaunchedAt $launchedAt
+        if (-not $candidate) { break }
+        try { $working = Set-PotatoWorkingWindow -Element $candidate; $window = $candidate }
+        catch { Write-PotatoLog -Level Warning -Message $_.Exception.Message }
+        if ($working) { break }
+        if ($launchWatch.ElapsedMilliseconds -lt $timeoutMs) { Start-Sleep -Milliseconds 50 }
+    } while ($launchWatch.ElapsedMilliseconds -lt $timeoutMs)
+    if ($working) { [void](Show-PotatoWindow -Handle $working.nativeWindowHandle -Maximize:$maximize) }
 
     $ownedProcessId = $null
     $startedId = [int]$started.Id
     if ($startedId -gt 0 -and $existingIds -notcontains $startedId) { $ownedProcessId = $startedId }
     if ($window) {
-        $windowProcessId = [int]$window.Current.ProcessId
+        $windowProcessId = [int]$working.processId
         if ($windowProcessId -gt 0 -and $existingIds -notcontains $windowProcessId) { $ownedProcessId = $windowProcessId }
     }
     if ($requireNew -and -not $ownedProcessId -and $startedId -gt 0) { $ownedProcessId = $startedId }
@@ -1026,14 +1053,33 @@ function Invoke-PotatoObserve {
 
     $depth = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Depth')) 2
     $maxElements = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('MaxElements')) 200
+    if ($depth -lt 0 -or $depth -gt 20 -or $maxElements -lt 1 -or $maxElements -gt 2000) { throw 'Observe Depth must be 0..20 and MaxElements 1..2000.' }
+    $format = [string](Get-PotatoArg $ArgsMap @('Format') 'Full')
+    if ($format -notin @('Full','Compact')) { throw 'Observe Format must be Full or Compact.' }
     $working = Get-PotatoWorkingElement
+    $root = Get-PotatoExplicitScope $ArgsMap
+    if (-not $root) { $root=$working }
+    if ($ArgsMap.ContainsKey('SelectorJson') -or $ArgsMap.ContainsKey('PathJson') -or $ArgsMap.ContainsKey('Name') -or $ArgsMap.ContainsKey('AutomationId')) {
+        $target=Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
+        if (-not $target.ok) { throw $target.error }
+        $root=$target.element
+    }
+    if ($format -eq 'Compact') {
+        $remaining=[ref]$maxElements
+        $tree = if ($root) { ConvertTo-PotatoTreeNode $root -Depth $depth -Remaining $remaining }
+        return [ordered]@{scope=(Get-PotatoArg $ArgsMap @('Scope') 'Working');
+            root=$(if ($root) { ConvertTo-PotatoElementInfo $root });
+            focusedElement=(ConvertTo-PotatoCompactElement (Get-PotatoForegroundWindowInfo));
+            elements=@(ConvertTo-PotatoCompactTree $tree); limitReached=($remaining.Value -le 0);
+            hint='Selectors are candidates within this scope; check uniqueness. Use click Auto. Add constraints only to disambiguate observed matches.'}
+    }
     $windows = @(Get-PotatoTopLevelWindows)
     $workingInfo = $null
     $tree = $null
     if ($working) {
         $workingInfo = ConvertTo-PotatoElementInfo -Element $working
         $remaining = [ref]$maxElements
-        $tree = ConvertTo-PotatoTreeNode -Element $working -Depth $depth -Remaining $remaining
+        $tree = ConvertTo-PotatoTreeNode -Element $root -Depth $depth -Remaining $remaining
     }
 
     $blocking = @()
@@ -1068,7 +1114,8 @@ function Resolve-PotatoCommandTarget {
     $path = $inputs.path
     $selector = $inputs.selector
     $parent = $null
-    $scopeRoot = if ($selector.ModalOnly) { Get-PotatoRootElement } else { $null }
+    $scopeRoot = Get-PotatoExplicitScope $ArgsMap
+    if (-not $scopeRoot -and $selector.ModalOnly) { $scopeRoot=Get-PotatoRootElement }
     $pathResult = Resolve-PotatoSelectorPath -Path $path -StartParent $scopeRoot
     if (-not $pathResult.ok) {
         return [ordered]@{ ok = $false; error = "Selector path failed at index $($pathResult.failedIndex)."; element = $null; selector = $selector }
@@ -1080,7 +1127,8 @@ function Resolve-PotatoCommandTarget {
         return [ordered]@{ ok = $true; element = $parent; selector = $selector }
     }
 
-    $found = @(Find-PotatoElement -Selector $selector -Parent $parent -FindFirst -TimeoutMs (ConvertTo-PotatoInt $selector.TimeoutMs 1000)) | Select-Object -First 1
+    $refresh = -not $path -and -not $scopeRoot -and [bool]$script:CurrentState.working
+    $found = @(Find-PotatoElement -Selector $selector -Parent $parent -FindFirst -TimeoutMs (ConvertTo-PotatoInt $selector.TimeoutMs 1000) -RefreshWorkingParent:$refresh) | Select-Object -First 1
     if (-not $found) {
         return [ordered]@{ ok = $false; error = 'No matching element was found.'; element = $null; selector = $selector }
     }
@@ -1098,7 +1146,8 @@ function Invoke-PotatoSelect {
     # A working window cannot be found by searching only its descendants.
     # Window queries also need to see sibling and owned dialog windows.
     $windowQuery = (-not $inputs.path) -and (([string]$inputs.selector.ControlType -eq 'Window') -or [bool]$inputs.selector.WindowTitle)
-    $scopeRoot = if ($inputs.selector.ModalOnly -or $windowQuery) { Get-PotatoRootElement } else { $null }
+    $scopeRoot = Get-PotatoExplicitScope $ArgsMap
+    if (-not $scopeRoot -and ($inputs.selector.ModalOnly -or $windowQuery)) { $scopeRoot=Get-PotatoRootElement }
     $pathResult = Resolve-PotatoSelectorPath -Path $inputs.path -StartParent $scopeRoot
     if (-not $pathResult.ok) { throw "Selector path failed at index $($pathResult.failedIndex)." }
 
@@ -1107,7 +1156,8 @@ function Invoke-PotatoSelect {
     $timeoutMs = ConvertTo-PotatoInt $selector.TimeoutMs 1000
     $findFirst = ConvertTo-PotatoBool $selector.FindFirst $false
     if ($maxResults -lt 1 -or $maxResults -gt 1000) { throw 'MaxResults must be 1..1000.' }
-    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults) |
+    $refresh = -not $inputs.path -and -not $scopeRoot -and [bool]$script:CurrentState.working
+    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh) |
         Select-Object -First $maxResults
 
     [ordered]@{
@@ -1257,6 +1307,12 @@ function Invoke-PotatoClick {
     # Read evidence before acting: invoking a dialog button may destroy it.
     $elementInfo = ConvertTo-PotatoElementInfo -Element $target.element
     if (-not $elementInfo.isEnabled) { throw 'The target element is disabled.' }
+    # Validate explicit Invoke BEFORE SetFocus: focusing a list item can select
+    # it, so a rejected method must not silently change the application state.
+    $invokePattern = $null
+    if ($method -eq 'Invoke' -and -not $target.element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invokePattern)) {
+        throw ('InvokePattern is unavailable on this control. Use -Method Auto to choose a supported UIA action or visible mouse click. Supported patterns: ' + ($elementInfo.supportedPatterns -join ', '))
+    }
     $focus = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Focus')) $true
     $elementFocus = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('ElementFocus')) $true
     $center = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Center')) $false
@@ -1281,10 +1337,6 @@ function Invoke-PotatoClick {
 
     $action = $null
     if ($method -eq 'Invoke') {
-        $invokePattern = $null
-        if (-not $target.element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$invokePattern)) {
-            throw ('InvokePattern is unavailable on this control. Use -Method Auto to choose a supported UIA action or visible mouse click. Supported patterns: ' + ($elementInfo.supportedPatterns -join ', '))
-        }
         $invokePattern.Invoke()
         $action = 'InvokePattern'
     }
@@ -1866,8 +1918,13 @@ function Invoke-PotatoCloseWindow {
         $workingHandle = [int64]$script:CurrentState.working.nativeWindowHandle
         $workingProcessId = [int]$script:CurrentState.working.processId
         if (($matchedHandles -contains $workingHandle) -or ($matchedProcessIds -contains $workingProcessId)) {
-            $script:CurrentState.working = $null
-            Save-PotatoState -State $script:CurrentState
+            # Close is asynchronous and can raise a save prompt. Keep the owned
+            # identity available for recovery while any of its windows remain.
+            $remaining = @(Get-PotatoTopLevelWindows -Selector @{ProcessId=$workingProcessId} -TimeoutMs 0)
+            if (-not $remaining.Count) {
+                $script:CurrentState.working = $null
+                Save-PotatoState -State $script:CurrentState
+            }
         }
     }
 
@@ -1984,8 +2041,19 @@ function Invoke-PotatoCliCommandCore {
         try {
             $help = Get-Content -LiteralPath (Join-Path $CliRoot 'commands.json') -Raw | ConvertFrom-Json
             $topic = Get-PotatoArg -ArgsMap $argsMap -Names @('Topic')
+            $topics = Get-PotatoArg -ArgsMap $argsMap -Names @('Topics')
             if (-not $topic -and $argsMap._.Count) { $topic = $argsMap._[0] }
-            if ($topic) {
+            if ($topics) {
+                if ($topic) { throw 'Use Topic or Topics, not both.' }
+                $selected=[ordered]@{}
+                foreach ($item in ([string]$topics -split ',')) {
+                    $item=$item.Trim()
+                    if ($help.commands.PSObject.Properties.Name -notcontains $item) { throw "Unknown help topic '$item'." }
+                    $selected[$item]=$help.commands.$item
+                }
+                $result=@{commands=$selected;rules=$help.rules;globalOptions=$help.globalOptions;selectorOptions=$help.selectorOptions}
+            }
+            elseif ($topic) {
                 if ($help.commands.PSObject.Properties.Name -notcontains $topic) { throw "Unknown help topic '$topic'." }
                 $result = @{ topic = $topic; help = $help.commands.$topic; rules = $help.rules; globalOptions = $help.globalOptions; selectorOptions = $help.selectorOptions }
             }

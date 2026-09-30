@@ -26,12 +26,13 @@
     "PathJson",
     "SelectorJson",
     "ProcessId",
-    "ModalOnly"
+    "ModalOnly",
+    "Scope"
   ],
   "commands": {
     "help": {
-      "usage": "help [-Topic type]",
-      "notes": "Read command guidance without a desktop session or state mutation."
+      "usage": "help [-Topic type | -Topics start,observe,click,type,press-key]",
+      "notes": "Read command guidance without a desktop session or state mutation. Topics combines several commands with one copy of shared rules; avoid separate process starts for each topic."
     },
     "state": {
       "usage": "state [-Clear]",
@@ -49,16 +50,16 @@
       "notes": "With ProcessId, includes modal Window descendants exposed beneath the owner in UIA; data.windows includes isModal. Close owned dialogs before parent windows."
     },
     "observe": {
-      "usage": "observe [-Depth 2] [-MaxElements 120]",
-      "notes": "Use for unknown UI states. Prefer targeted select/read for known postconditions."
+      "usage": "observe [-Format Compact|Full] [-Scope Working|FocusedWindow] [<selector options>] [-Depth 2] [-MaxElements 120]",
+      "notes": "Compact returns actionable flat elements, focusedElement, live bounds, patterns and candidate name/id selectors; check uniqueness before acting. Full (CLI default) preserves the nested tree. FocusedWindow inspects the foreground window only if it belongs to the working application, useful for native dialogs without relying on IsModal. Name/SelectorJson/PathJson can anchor a subtree. Depth 0..20, MaxElements 1..2000; limitReached in compact output means the node budget was exhausted. Opaque Pane roles can change as providers initialize; prefer minimal name/id constraints."
     },
     "select": {
       "usage": "select <selector options> [-MaxResults 20]",
-      "notes": "Queries elements; it does not select a dropdown item. data.count=0 is a valid query result. Open a dropdown before looking for its items. Discover role before imposing a guessed ControlType; use ProcessId and ModalOnly for scoped dialog queries."
+      "notes": "Queries elements; it does not select a dropdown item. data.count=0 is a valid query result. Open a dropdown before looking for its items. Use SelectorJson with a Name array for alternative labels in one query; TimeoutMs 0 is useful for discovery. Scope FocusedWindow searches the owned foreground dialog without relying on IsModal. Add role/class constraints only to disambiguate, especially for opaque Pane controls."
     },
     "click": {
       "usage": "click <selector options> [-Method Auto|Mouse|Invoke] [-RelativeX 0.5 -RelativeY 0.5] [-Center true] [-Button Left|Right] [-Focus false] [-ElementFocus false] [-OffsetX 0] [-OffsetY 0] [-VerifyDisappeared]",
-      "notes": "Auto tries UIA patterns then a visible mouse click; Mouse uses live geometry. RelativeX/Y select a point within live bounds (fractions 0..1, both required) and force mouse input; do not combine with offsets/Center/Invoke. For menus already open, Focus false and ElementFocus false avoid changing focus before the click. Observe the postcondition before retrying."
+      "notes": "Use default Auto, which tries supported UIA patterns then a visible mouse click. Explicit Invoke is checked before changing focus and requires InvokePattern. Scope FocusedWindow targets controls in the owned foreground dialog. Mouse uses live geometry. RelativeX/Y select a point within live bounds (fractions 0..1, both required) and force mouse input; do not combine with offsets/Center/Invoke. For menus already open, Focus false and ElementFocus false avoid changing focus before the click. Observe the postcondition before retrying."
     },
     "click-coordinate": {
       "usage": "click-coordinate -X 100 -Y 100 [-Button Left|Right]",

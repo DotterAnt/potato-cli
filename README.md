@@ -25,6 +25,10 @@ Example:
 .\potato.ps1 observe -Depth 2 -MaxElements 120
 ```
 
+For agent discovery, use `observe -Format Compact -Depth 3 -MaxElements 80`: it returns a flat list with observed names/IDs, patterns, focus, live bounds and candidate selectors. `observe -Scope FocusedWindow` targets the owned foreground dialog; `select`, `read`, `click` and selector-based `type` support the same scope. It does not activate another application or rely on a dialog reporting UIA IsModal. Check selector uniqueness; avoid pinning a temporary opaque `Pane` role into generated code. Prefer click's default `Auto` method.
+
+Read several needed topics in one call: `help -Topics start,observe,click,type,press-key`. For alternative discovery labels, use `select -SelectorJson '{"Name":["Save","Browse"]}' -TimeoutMs 0`. Use timed waits for expected transitions rather than repeated guesses. The framework's exploration Batch entrypoint records receipts and saves session configuration; its default compact output removes repeated envelope metadata while keeping full command envelopes on disk.
+
 ## JSON Contract
 
 Every command writes exactly one compact JSON object to stdout.
