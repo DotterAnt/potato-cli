@@ -28,7 +28,9 @@
     "SelectorJson",
     "ProcessId",
     "ModalOnly",
-    "Scope"
+    "Scope",
+    "WindowSelectorJson",
+    "InteractiveOnly"
   ],
   "commands": {
     "help": {
@@ -51,11 +53,13 @@
       "notes": "With ProcessId, includes modal Window descendants exposed beneath the owner in UIA; data.windows includes isModal. A nonempty windows result is eligible exploration evidence for window/title state. File creation/content need their own receipts. Close owned dialogs before parent windows."
     },
     "observe": {
-      "usage": "observe [-Format Compact|Full] [-Scope Working|FocusedWindow] [<selector options>] [-Depth 2] [-MaxElements 120]",
+      "usage": "observe [-Format Compact|Full] [-Scope Working|FocusedWindow|ForegroundWindow] [-WindowSelectorJson <exact window identity>] [<selector options>] [-Depth 2] [-MaxElements 120]",
+      "brokerScope": "For an observed system-hosted dialog outside the application's owner chain, use Scope ForegroundWindow with WindowSelectorJson containing exact Name and ClassName (optional ProcessId), plus FallbackReason/FallbackEvidence. Name/ClassName are literal case-sensitive identities, not patterns. Only observe/select/read/wait-element/click support this scope. It inspects the current foreground root, never activates/adopts the broker or grants process cleanup/unscoped input. Click rechecks the guard and target ancestry before dispatch. Ordinary FocusedWindow remains owner-restricted.",
       "notes": "Compact returns actionable flat elements, focusedElement, live bounds, patterns and candidate selectors; check uniqueness before acting. Full (CLI default) preserves the nested tree. FocusedWindow inspects the owned foreground window. Name/SelectorJson/PathJson can anchor a subtree. Depth 0..20, MaxElements 1..2000. limitReached means the node budget was exhausted; depthBoundaryReached means descendants at the depth boundary were not inspected (not proof that they exist). A missing control in a bounded tree is not proof of UIA absence. Before coordinate fallback, scope deeper discovery to an observed container or search a short label fragment with select -Name '*fragment*' -TimeoutMs 0. Opaque Pane roles can change as providers initialize."
     },
     "select": {
       "usage": "select <selector options> [-MaxResults 20]",
+      "providerFallback": "A filtered lookup miss inside an application subtree is retried with the same unfiltered child traversal as observe, using unchanged local matching. Traversal is bounded to 1500 nodes/1500 ms/32 levels and never expands the desktop; SearchIncomplete requires a narrower PathJson scope, not guessed coordinates. InteractiveOnly filters visible enabled controls locally and is useful for wait-element before submitting a dialog.",
       "notes": "Queries elements; it does not select a dropdown item. data.count=0 is a valid query result. Open a dropdown before looking for its items. Use SelectorJson with a Name array for alternative labels in one query; TimeoutMs 0 is useful for discovery. Scope FocusedWindow searches the owned foreground dialog without relying on IsModal. Add role/class constraints only to disambiguate, especially for opaque Pane controls."
     },
     "click": {
@@ -68,8 +72,9 @@
       "notes": "Fallback only; retain a screenshot and explain the missing selector route."
     },
     "type": {
+      "pacing": "Default InputDelayMs 5 sends one Unicode scalar at a time, giving asynchronous editors time to consume keyboard events. InputDelayMs accepts 0..100; 0 explicitly opts into bursts for a route tested to tolerate them. Legacy TypeByCharacter means 50 ms and cannot be combined with InputDelayMs. Surrogate pairs stay together. Native focus is rechecked during typing; a change aborts remaining text and reports partial dispatch as unknown. No text is resent automatically. Use Verify/readback to detect lost text; a successful SendInput is queue insertion, not proof of consumption. Preserve tested pacing in generated scripts.",
       "focusInput": "Focused means unscoped keyboard input at the existing owned foreground target. It does not require an editable UIA role or a true UIA HasKeyboardFocus flag: Win32 keyboard focus corroborates custom canvases whose accessibility provider disagrees. No focus/selection changes are made. FocusTimeoutMs defaults to 2000 even without ExpectedFocusJson. Optional ExpectedFocusJson matches the reported UIA target or actual native focus control, not an arbitrary unfocused selector. data.inputFocus reports the source and native identity; failures expose error.focus with outcome not-dispatched. Use the observed identity after a dialog/menu transition to avoid typing into another owned control. A ready keyboard target does not prove a text-edit caret or successful content entry; assert the result.",
-      "usage": "type -Text 'literal text' [-PathKind SaveFile|OpenFile|Directory] [<selector options>] [-TargetMode Writable|Focused] [-ExpectedFocusJson <identity selector> -FocusTimeoutMs 2000] [-FallbackReason <reason> -FallbackEvidence <reference>] [-FocusMethod Auto|UIA|Mouse] [-PreDelete] [-ClearMethod Selection|Shortcut] [-Verify] [-VerifyMode Exact|Contains|NormalizedExact|NormalizedContains] [-VerifyTimeoutMs 3000] [-MaxAttempts 0] [-TypeByCharacter] [-Focus]",
+      "usage": "type -Text 'literal text' [-PathKind SaveFile|OpenFile|Directory] [<selector options>] [-TargetMode Writable|Focused] [-ExpectedFocusJson <identity selector> -FocusTimeoutMs 2000] [-FallbackReason <reason> -FallbackEvidence <reference>] [-FocusMethod Auto|UIA|Mouse] [-PreDelete] [-ClearMethod Selection|Shortcut] [-Verify] [-VerifyMode Exact|Contains|NormalizedExact|NormalizedContains] [-VerifyTimeoutMs 3000] [-MaxAttempts 0] [-InputDelayMs 5 | -TypeByCharacter] [-Focus]",
       "pathInput": "For filename fields use PathKind SaveFile (existing parent directory), OpenFile (existing file), or Directory (existing directory). Requires an absolute drive or UNC path. Checks the literal Text before focus, clearing, or typing; PathValidationFailed means not-dispatched. No files/directories are created and Text is never trimmed, expanded, or rewritten. Preserve the full path, including spaces and Unicode; do not copy a shortened UI label or insert quote characters around Text. This validates the supplied path, not field readback, save permission, or the application's save result. Verify readback when supported and assert wait-file after the visible save action.",
       "notes": "Literal Unicode keyboard input, never clipboard. Writable mode is default and checks UIA writability/focus; selector Auto focus falls back to a visible click. Multiline literals require a writable Document target, not a nested single-line Edit. Focused mode is an explicit audited fallback for an observed opaque editor: existing focus only, no target selector/refocus/PreDelete/newlines/tabs, and explicit read-only still fails. ExpectedFocusJson optionally waits for observed focus identity and owned foreground readiness without clicking/refocusing or losing an existing selection; FocusTimeoutMs is 0..10000. It is a guard, not a focus action. Both modes check the actual foreground application or owned dialog. Verify polls current readback without resending or committing. For commit-on-exit controls, type once without Verify, commit through an observed control or permitted press-key Enter, then read/assert. Normalized modes reconcile line endings. TimeoutMs is lookup time; VerifyTimeoutMs is readback time. For replacement prefer writable PreDelete plus Verify; PreDelete uses TextPattern selection and Backspace. Do not click an already selected filename just to wait for focus. Shortcut clearing requires authorization."
     },
@@ -91,7 +96,7 @@
     },
     "wait-element": {
       "usage": "wait-element <selector options>",
-      "notes": "Assert data.exists, not just ok. Use the selector's TimeoutMs. Window queries in Scope FocusedWindow include the owned foreground dialog itself, not just its descendants. Ordinary window queries include the working window and other process windows. FocusedWindow waits refresh the scope between failed probes. A launched window does not prove the application's next control is ready."
+      "notes": "Assert data.exists, not just ok. Use TimeoutMs; scoped waits allow 0..60000 ms. Scope FocusedWindow/ForegroundWindow waits tolerate a temporarily different foreground owner/guard and refresh the root until the deadline. data.lastScopeError explains an unmet ownership/guard condition. Invalid selectors still fail immediately. Window queries include the scoped root itself. Add InteractiveOnly for a visible enabled submit control. A launched window does not prove blank document state or readiness."
     },
     "wait-file": {
       "usage": "wait-file -Path 'output.ext' [-TimeoutMs 10000] [-MinBytes 1] [-StableMs 500] [-WaitForNotExists]",

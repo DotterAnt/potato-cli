@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 // Unicode keyboard events, never clipboard or application object-model writes.
 public static class PotatoLiteralInput {
@@ -18,6 +19,15 @@ public static class PotatoLiteralInput {
     struct Input { public uint type; public InputUnion value; }
     [DllImport("user32.dll", SetLastError=true)]
     static extern uint SendInput(uint count, Input[] input, int size);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr window);
+    [StructLayout(LayoutKind.Sequential)] struct Rect { public int left, top, right, bottom; }
+    [StructLayout(LayoutKind.Sequential)] struct GuiThreadInfo {
+        public uint size, flags;
+        public IntPtr active, focus, capture, menuOwner, moveSize, caret;
+        public Rect caretRect;
+    }
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
 
     static Input Key(char value, bool up) {
         bool control = value == '\n' || value == '\t';
@@ -27,10 +37,35 @@ public static class PotatoLiteralInput {
         } } };
     }
     public static void SendText(string text) {
+        var info=new GuiThreadInfo {size=(uint)Marshal.SizeOf(typeof(GuiThreadInfo))};
+        if (!GetGUIThreadInfo(0,ref info)) throw new InvalidOperationException("Cannot confirm keyboard focus before typing.");
+        SendText(text,5,GetForegroundWindow().ToInt64(),info.focus.ToInt64());
+    }
+    public static void SendText(string text, int delayMs, long foregroundHandle, long focusHandle) {
+        if (delayMs<0 || delayMs>100) throw new ArgumentOutOfRangeException("delayMs");
+        for (int i=0;i<text.Length;i++) {
+            if (char.IsHighSurrogate(text[i]) && i+1<text.Length && char.IsLowSurrogate(text[i+1])) {i++;continue;}
+            if (char.IsSurrogate(text[i])) {
+                var failure=new ArgumentException("Text contains an unpaired UTF-16 surrogate. No input was sent.");
+                failure.Data["PotatoErrorType"]="InvalidText"; failure.Data["NoInputSent"]=true;
+                throw failure;
+            }
+        }
         text = text.Replace("\r\n", "\n").Replace("\r", "\n");
         for (int offset=0; offset<text.Length;) {
-            int length=Math.Min(128,text.Length-offset);
-            if (offset+length<text.Length && char.IsHighSurrogate(text[offset+length-1])) length--;
+            var info=new GuiThreadInfo {size=(uint)Marshal.SizeOf(typeof(GuiThreadInfo))};
+            if (foregroundHandle==0 || focusHandle==0 || GetForegroundWindow().ToInt64()!=foregroundHandle ||
+                !GetGUIThreadInfo(0,ref info) || info.focus.ToInt64()!=focusHandle || !IsWindowEnabled(info.focus)) {
+                var failure=new InvalidOperationException("Keyboard target changed during typing. Input was stopped; inspect content before retrying.");
+                failure.Data["PotatoErrorType"]="InputFocusChanged";
+                failure.Data["NoInputSent"]=offset==0;
+                throw failure;
+            }
+            // Deliver one Unicode scalar per paced call. A successful SendInput
+            // reports queue insertion, not that the editor consumed the text.
+            int length=delayMs==0 ? Math.Min(128,text.Length-offset) :
+                (char.IsHighSurrogate(text[offset]) && offset+1<text.Length && char.IsLowSurrogate(text[offset+1]) ? 2 : 1);
+            if (length>1 && offset+length<text.Length && char.IsHighSurrogate(text[offset+length-1])) length--;
             var inputs=new Input[length*2];
             for (int i=0;i<length;i++) {
                 inputs[i*2]=Key(text[offset+i],false);
@@ -40,6 +75,7 @@ public static class PotatoLiteralInput {
             if (sent!=inputs.Length)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Text input was incomplete; observe the field before retrying.");
             offset+=length;
+            if (delayMs>0) Thread.Sleep(delayMs);
         }
     }
 }

@@ -57,7 +57,7 @@ $module=Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -Pa
     function Test-PotatoElementMatch { return $true }
     function Write-PotatoLog { }
     $found=@(Find-PotatoElement -Selector @{Name='Ready control'} -Parent $stale -TimeoutMs 1000 -FindFirst -RefreshWorkingParent)
-    Check ($found.Count -eq 1 -and $found[0].Name -eq 'Ready control' -and $script:parentReads -eq 1) 'Wait retried a dead splash instead of rediscovering the working window.'
+    Check ($found.Count -eq 1 -and $found[0].Name -eq 'Ready control' -and $script:parentReads -eq 1) "Wait retried a dead splash instead of rediscovering the working window. Found=$($found.Count); parentReads=$script:parentReads."
     $script:focusReads=0
     function Get-PotatoFocusedWindow { $script:focusReads++; return $live }
     $found=@(Find-PotatoElement -Selector @{Name='Ready control'} -Parent $stale -TimeoutMs 1000 -FindFirst -RefreshFocusedParent)

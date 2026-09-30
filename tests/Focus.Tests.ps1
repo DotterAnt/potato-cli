@@ -27,5 +27,14 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     Reject {Wait-PotatoInputFocus '' 0} 'Unowned focus was accepted without an identity selector.'
     Reject {Wait-PotatoInputFocus '{}' 0} 'Empty expected identity accepted.'
     Reject {Wait-PotatoInputFocus '{"Name":"Canvas"}' 10001} 'Unbounded focus wait accepted.'
+    Initialize-PotatoWindowIdentity
+    foreach ($text in @(([string][char]0xd800+'x'),([string][char]0xdc00))) {
+        $invalid=$null
+        try {[PotatoLiteralInput]::SendText($text,5,0,0)} catch {
+            $invalid=$_.Exception
+            while ($invalid.InnerException) {$invalid=$invalid.InnerException}
+        }
+        Check ($invalid.Data['PotatoErrorType'] -eq 'InvalidText' -and $invalid.Data['NoInputSent']) 'Malformed Unicode was not rejected before dispatch.'
+    }
     "Focus checks: $script:checks passed"
 }

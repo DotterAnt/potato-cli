@@ -1,22 +1,98 @@
 # Application-independent discovery helpers. Never activate a window while observing.
+function New-PotatoScopeFailure {
+    param([string]$Message)
+    $failure=New-Object InvalidOperationException($Message)
+    $failure.Data['PotatoErrorType']='ScopeNotReady'; $failure.Data['NoInputSent']=$true
+    return $failure
+}
+
+function Get-PotatoGuardedForegroundWindow {
+    param([string]$WindowSelectorJson)
+    $selector=ConvertFrom-PotatoJsonArgument $WindowSelectorJson
+    # A broker is a per-command GUI scope, never an adopted process or cleanup target.
+    $keys=if ($selector -is [Collections.IDictionary]) {@($selector.Keys)} else {@($selector.PSObject.Properties.Name)}
+    if (-not $selector -or -not ($selector.Name -is [string]) -or [string]::IsNullOrWhiteSpace($selector.Name) -or
+        -not ($selector.ClassName -is [string]) -or [string]::IsNullOrWhiteSpace($selector.ClassName) -or
+        @($keys | Where-Object {$_ -notin @('Name','ClassName','ProcessId')}).Count -or
+        ($keys -contains 'ProcessId' -and ($selector.ProcessId -notmatch '^\d+$' -or [int]$selector.ProcessId -lt 1))) {
+        throw 'ForegroundWindow requires WindowSelectorJson with an exact observed Name and ClassName, and optional ProcessId only.'
+    }
+    [void](Get-PotatoWorkingElement -Required)
+    Initialize-PotatoWindowIdentity
+    $handle=[PotatoWindowIdentity]::ForegroundRoot()
+    if ($handle -eq [IntPtr]::Zero) { throw (New-PotatoScopeFailure 'No foreground window matches the guarded scope.') }
+    $element=[Windows.Automation.AutomationElement]::FromHandle($handle)
+    if ($element.Current.Name -cne $selector.Name -or $element.Current.ClassName -cne $selector.ClassName -or
+        ($selector.ProcessId -and $element.Current.ProcessId -ne [int]$selector.ProcessId)) {
+        throw (New-PotatoScopeFailure 'Foreground window does not match WindowSelectorJson. No action was dispatched; inspect the current window instead of guessing coordinates.')
+    }
+    return $element
+}
+
 function Get-PotatoFocusedWindow {
     [void](Get-PotatoWorkingElement -Required)
     Initialize-PotatoWindowIdentity
     $handle = [PotatoWindowIdentity]::ForegroundRoot()
-    if ($handle -eq [IntPtr]::Zero) { throw 'No foreground window to inspect.' }
+    if ($handle -eq [IntPtr]::Zero) { throw (New-PotatoScopeFailure 'No foreground window to inspect.') }
     $element = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
     if (-not (Test-PotatoInputOwnership $element)) {
-        throw 'FocusedWindow belongs to another application. Focus the owned application explicitly.'
+        throw (New-PotatoScopeFailure 'FocusedWindow belongs to another application. For an observed system-hosted dialog, use Scope ForegroundWindow with an exact WindowSelectorJson and fallback evidence; this does not adopt its process.')
     }
     return $element
+}
+
+function Assert-PotatoGuardedTarget {
+    param($Element,[hashtable]$ArgsMap)
+    $root=Get-PotatoGuardedForegroundWindow (Get-PotatoArg $ArgsMap @('WindowSelectorJson'))
+    $node=$Element
+    for ($i=0;$i -lt 32 -and $node;$i++) {
+        if ($node.Current.NativeWindowHandle -eq $root.Current.NativeWindowHandle -and $node.Current.ProcessId -eq $root.Current.ProcessId) {return}
+        $node=[Windows.Automation.TreeWalker]::RawViewWalker.GetParent($node)
+    }
+    throw (New-PotatoScopeFailure 'Click target is no longer inside the guarded foreground window. No input was sent.')
 }
 
 function Get-PotatoExplicitScope {
     param([hashtable]$ArgsMap)
     $scope = [string](Get-PotatoArg $ArgsMap @('Scope') 'Working')
     if ($scope -eq 'FocusedWindow') { return Get-PotatoFocusedWindow }
-    if ($scope -ne 'Working') { throw 'Scope must be Working or FocusedWindow.' }
+    if ($scope -eq 'ForegroundWindow') { return Get-PotatoGuardedForegroundWindow (Get-PotatoArg $ArgsMap @('WindowSelectorJson')) }
+    if ($scope -ne 'Working') { throw 'Scope must be Working, FocusedWindow or guarded ForegroundWindow.' }
     return $null
+}
+
+function Find-PotatoObservedTreeMatches {
+    param($Parent,$Selector,[bool]$Recurse=$true,[int]$MaxResults=0,[int]$NodeLimit=1500,[int]$BudgetMs=1500)
+    # Match through the same unfiltered child traversal used by observe. Some
+    # hybrid providers omit descendants only when a search predicate is pushed down.
+    $queue=New-Object Collections.Queue
+    $queue.Enqueue(@{element=$Parent;depth=0})
+    $watch=[Diagnostics.Stopwatch]::StartNew(); $visited=0; $found=@()
+    $complete=$true
+    while ($queue.Count) {
+        if ($visited -ge $NodeLimit -or $watch.ElapsedMilliseconds -ge $BudgetMs) {$complete=$false;break}
+        $node=$queue.Dequeue()
+        try { $children=$node.element.FindAll([Windows.Automation.TreeScope]::Children,[Windows.Automation.Condition]::TrueCondition) }
+        catch { $complete=$false;continue }
+        foreach ($child in $children) {
+            $visited++
+            if ($visited -gt $NodeLimit -or $watch.ElapsedMilliseconds -ge $BudgetMs) {$complete=$false;break}
+            try { $matches=Test-PotatoElementMatch $child $Selector } catch { $complete=$false;continue }
+            if ($matches) {
+                $found+=,$child
+                if ($MaxResults -gt 0 -and $found.Count -ge $MaxResults) { return @{matches=$found;complete=$true} }
+            }
+            if ($Recurse) {
+                if ($node.depth -ge 31) {$complete=$false} else {$queue.Enqueue(@{element=$child;depth=$node.depth+1})}
+            }
+        }
+    }
+    if (-not $complete) {
+        $failure=New-Object InvalidOperationException('Scoped provider traversal is incomplete. Narrow PathJson to an observed container; do not infer absence or uniqueness from a partial tree.')
+        $failure.Data['PotatoErrorType']='SearchIncomplete'; $failure.Data['NoInputSent']=$true
+        throw $failure
+    }
+    return @{matches=$found;complete=$true}
 }
 
 function ConvertTo-PotatoCompactElement {

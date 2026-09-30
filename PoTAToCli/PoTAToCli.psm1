@@ -325,6 +325,7 @@ function New-PotatoSelectorFromArguments {
     }
 
     $selector.ModalOnly = ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('ModalOnly')) $false
+    $selector.InteractiveOnly = ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('InteractiveOnly')) $false
     $selector.Regex = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Regex')) $false
     $selector.Recurse = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Recurse')) $true
     $selector.FindFirst = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('FindFirst')) $false
@@ -530,6 +531,7 @@ function Find-PotatoElement {
         [int] $MaxResults = 0,
         [switch] $RefreshWorkingParent,
         [switch] $RefreshFocusedParent,
+        [string] $ForegroundSelectorJson,
         [switch] $IncludeRoot
     )
 
@@ -570,6 +572,7 @@ function Find-PotatoElement {
                 }
             }
             if ($RefreshFocusedParent -and $attempt -gt 0) { $Parent=Get-PotatoFocusedWindow }
+            if ($ForegroundSelectorJson) { $Parent=Get-PotatoGuardedForegroundWindow $ForegroundSelectorJson }
             $attempt++
             if ($IncludeRoot -and (Test-PotatoElementMatch -Element $Parent -Selector $Selector)) {
                 $matches=@($Parent)
@@ -587,8 +590,14 @@ function Find-PotatoElement {
                     if ($MaxResults -gt 0 -and $matches.Count -ge $MaxResults) { break }
                 }
             }
+            if (-not $matches.Count -and $Parent.Current.ProcessId -gt 0) {
+                $limit=if ($firstOnly) {1} else {$MaxResults}
+                $fallback=Find-PotatoObservedTreeMatches $Parent $Selector $recurse $limit
+                $matches=@($fallback.matches)
+            }
         }
         catch {
+            if ($_.Exception.Data['PotatoErrorType'] -in @('SearchIncomplete','ScopeNotReady')) { throw }
             Write-PotatoLog -Level Warning -Message "Element search failed: $($_.Exception.Message)"
         }
 
@@ -1081,9 +1090,15 @@ function Invoke-PotatoObserve {
     $working = Get-PotatoWorkingElement
     $root = Get-PotatoExplicitScope $ArgsMap
     if (-not $root) { $root=$working }
-    if ($ArgsMap.ContainsKey('SelectorJson') -or $ArgsMap.ContainsKey('PathJson') -or $ArgsMap.ContainsKey('Name') -or $ArgsMap.ContainsKey('AutomationId')) {
+    $inputs=Get-PotatoSelectorInputs $ArgsMap
+    $hasSelector=$inputs.path -or $inputs.selector.Name -or $inputs.selector.AutomationId -or $inputs.selector.ClassName -or $inputs.selector.ControlType -or $inputs.selector.ProcessName -or $inputs.selector.ProcessId -or $inputs.selector.WindowTitle
+    if ($hasSelector -and -not (-not $inputs.path -and $root -and (Test-PotatoElementMatch $root $inputs.selector))) {
         $target=Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
-        if (-not $target.ok) { throw $target.error }
+        if (-not $target.ok) {
+            $failure=New-Object InvalidOperationException("$($target.error) Observation selectors stay inside their scope; use guarded ForegroundWindow for an observed external dialog.")
+            $failure.Data['PotatoErrorType']='TargetNotFound'; $failure.Data['NoInputSent']=$true
+            throw $failure
+        }
         $root=$target.element
     }
     if ($format -eq 'Compact') {
@@ -1194,8 +1209,9 @@ function Invoke-PotatoSelect {
     if ($maxResults -lt 1 -or $maxResults -gt 1000) { throw 'MaxResults must be 1..1000.' }
     $refresh = -not $inputs.path -and -not $scopeRoot -and [bool]$script:CurrentState.working
     $refreshFocus = -not $inputs.path -and (Get-PotatoArg $ArgsMap @('Scope') 'Working') -eq 'FocusedWindow'
-    $includeRoot=$refreshFocus -and $windowQuery
-    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus -IncludeRoot:$includeRoot) |
+    $foregroundSelector=if (-not $inputs.path -and (Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') {Get-PotatoArg $ArgsMap @('WindowSelectorJson')} else {$null}
+    $includeRoot=($refreshFocus -or $foregroundSelector) -and $windowQuery
+    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus -ForegroundSelectorJson $foregroundSelector -IncludeRoot:$includeRoot) |
         Select-Object -First $maxResults
 
     [ordered]@{
@@ -1381,6 +1397,7 @@ function Invoke-PotatoClick {
     }
 
     $action = $null
+    if ((Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') { Assert-PotatoGuardedTarget $target.element $ArgsMap }
     if ($method -eq 'Invoke') {
         $invokePattern.Invoke()
         $action = 'InvokePattern'
@@ -1393,7 +1410,7 @@ function Invoke-PotatoClick {
         if ($elementInfo.isOffscreen -or $elementInfo.boundingRectangle.width -le 0 -or $elementInfo.boundingRectangle.height -le 0) {
             throw 'Mouse click requires a visible, nonempty target rectangle.'
         }
-        if (-not $ArgsMap.ContainsKey('Focus')) {
+        if (-not $ArgsMap.ContainsKey('Focus') -and (Get-PotatoArg $ArgsMap @('Scope')) -ne 'ForegroundWindow') {
             $node=$target.element
             for ($i=0;$i -lt 32 -and $node;$i++) {
                 if ($node.Current.NativeWindowHandle) {
@@ -1410,6 +1427,7 @@ function Invoke-PotatoClick {
         }
         if ($relative) { $point = Get-PotatoClickPoint -Element $target.element -RelativeX ([double]$ArgsMap.RelativeX) -RelativeY ([double]$ArgsMap.RelativeY) }
         else { $point = Get-PotatoClickPoint -Element $target.element -Center $center -OffsetX $offsetX -OffsetY $offsetY -OffsetClickablePoint $offsetClickablePoint }
+        if ((Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') { Assert-PotatoGuardedTarget $target.element $ArgsMap }
         Move-PotatoMouse -X $point.x -Y $point.y
         Invoke-PotatoMouseClick -Button $button
         $action = 'Mouse'
@@ -1540,6 +1558,8 @@ function Invoke-PotatoType {
     $preDelete = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('PreDelete')) $false
     $verify = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Verify')) $false
     $typeByCharacter = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('TypeByCharacter')) $false
+    $inputDelayMs=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('InputDelayMs')) $(if ($typeByCharacter) {50} else {5})
+    if ($inputDelayMs -lt 0 -or $inputDelayMs -gt 100 -or ($typeByCharacter -and $ArgsMap.ContainsKey('InputDelayMs'))) { throw 'InputDelayMs must be 0..100; do not combine it with the legacy TypeByCharacter flag.' }
     $useWildcard = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('UseWildcardForVerify')) $false
     $verifyMode = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('VerifyMode') -Default $(if ($useWildcard) { 'Contains' } else { 'Exact' }))
     if ($verifyMode -notin @('Exact','Contains','NormalizedExact','NormalizedContains')) { throw 'VerifyMode must be Exact, Contains, NormalizedExact, or NormalizedContains.' }
@@ -1575,7 +1595,11 @@ function Invoke-PotatoType {
     $usedFocusMethod = 'ExistingFocus'
     if ($hasTargetSelector) {
         $target = Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
-        if (-not $target.ok) { throw $target.error }
+        if (-not $target.ok) {
+            $failure=New-Object InvalidOperationException($target.error)
+            $failure.Data['PotatoErrorType']='TargetNotFound'; $failure.Data['NoInputSent']=$true
+            throw $failure
+        }
         $element = $target.element
         Assert-PotatoTextTarget -Element $element -Text ([string]$text) -RequireFocus:$false
         if ($requestedFocusMethod -ne 'Mouse') {
@@ -1616,21 +1640,10 @@ function Invoke-PotatoType {
     }
 
     if (-not ('PotatoLiteralInput' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'LiteralInput.cs') }
-    $sendText = {
-        param($value, $byChar)
-        if ($byChar) {
-            foreach ($char in [char[]]([string]$value).Replace("`r`n", "`n").Replace("`r", "`n")) {
-                [PotatoLiteralInput]::SendText([string]$char)
-                Start-Sleep -Milliseconds 50
-            }
-        }
-        else {
-            [PotatoLiteralInput]::SendText([string]$value)
-        }
-    }
-
     if ($opaque) { Assert-PotatoInputFocusUnchanged $inputFocus } else { Assert-PotatoForegroundInput $element }
-    & $sendText $text $typeByCharacter
+    $native=Get-PotatoNativeInputState
+    if (-not $native.ready) { throw (New-PotatoFocusFailure 'Native keyboard target is not ready. No input was sent.' $native) }
+    [PotatoLiteralInput]::SendText([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle)
     $typedOk = $null
     $verification = $null
     if ($verify) {
@@ -1641,7 +1654,7 @@ function Invoke-PotatoType {
     $script:CurrentState.lastAction = [ordered]@{ command = 'type'; ok = ($typedOk -ne $false); timestamp = (Get-Date).ToString('o') }
     Save-PotatoState -State $script:CurrentState
 
-    [ordered]@{ typed = $true; textLength = ([string]$text).Length; verified = $typedOk; verificationPerformed = $verify; verification = $verification; inputMethod = 'UnicodeKeyboard'; focusMethod = $usedFocusMethod; targetMode=$targetMode; target=$targetInfo;
+    [ordered]@{ typed = $true; textLength = ([string]$text).Length; verified = $typedOk; verificationPerformed = $verify; verification = $verification; inputMethod = 'UnicodeKeyboard'; inputDelayMs=$inputDelayMs; focusMethod = $usedFocusMethod; targetMode=$targetMode; target=$targetInfo;
         inputFocus=$(if ($inputFocus) {@{source=$inputFocus.source;native=$inputFocus.native;waitMs=$inputFocus.waitMs}}); clearMethod = $(if ($preDelete) { $clearMethod } else { $null }) }
 }
 
@@ -1769,11 +1782,26 @@ function Invoke-PotatoWaitElement {
         [hashtable] $ArgsMap
     )
 
-    $result = Invoke-PotatoSelect -ArgsMap $ArgsMap
+    if ((Get-PotatoArg $ArgsMap @('Scope')) -in @('FocusedWindow','ForegroundWindow')) {
+        $timeout=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('TimeoutMs','MillisecondsToWait')) 1000
+        if ($timeout -lt 0 -or $timeout -gt 60000) {throw 'Scoped wait TimeoutMs must be 0..60000.'}
+        $watch=[Diagnostics.Stopwatch]::StartNew(); $probe=$ArgsMap.Clone(); $probe.TimeoutMs=0
+        $lastScopeError=$null
+        do {
+            try { $result=Invoke-PotatoSelect $probe; $lastScopeError=$null }
+            catch {
+                if ($_.Exception.Data['PotatoErrorType'] -ne 'ScopeNotReady') {throw}
+                $lastScopeError=$_.Exception.Message; $result=@{count=0;elements=@()}
+            }
+            if ($result.count -gt 0 -or $watch.ElapsedMilliseconds -ge $timeout) {break}
+            Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(100,$timeout-$watch.ElapsedMilliseconds)))
+        } while ($true)
+    } else { $result = Invoke-PotatoSelect -ArgsMap $ArgsMap }
     [ordered]@{
         exists = ($result.count -gt 0)
         count = $result.count
         elements = $result.elements
+        lastScopeError = $lastScopeError
     }
 }
 
@@ -2222,11 +2250,13 @@ function Invoke-PotatoCliCommandCore {
             type = $(if (-not $policy) { 'InteractionPolicyViolation' } else { $_.Exception.GetType().FullName })
             category = [string]$_.CategoryInfo.Category
         }
-        if ($_.Exception.Data['PotatoErrorType']) {
-            $errorObject.type=$_.Exception.Data['PotatoErrorType']
-            $errorObject.candidates=$_.Exception.Data['candidates']
-            if ($_.Exception.Data['focus']) { $errorObject.focus=$_.Exception.Data['focus'] }
-            if ($_.Exception.Data['NoInputSent']) { $dispatched=$false }
+        $diagnostic=$_.Exception
+        while (-not $diagnostic.Data['PotatoErrorType'] -and $diagnostic.InnerException) { $diagnostic=$diagnostic.InnerException }
+        if ($diagnostic.Data['PotatoErrorType']) {
+            $errorObject.type=$diagnostic.Data['PotatoErrorType']
+            $errorObject.candidates=$diagnostic.Data['candidates']
+            if ($diagnostic.Data['focus']) { $errorObject.focus=$diagnostic.Data['focus'] }
+            if ($diagnostic.Data['NoInputSent']) { $dispatched=$false }
         }
         if ($script:CurrentState) { try { Write-PotatoLog -Command $normalized -Level Error -Message $errorObject.message } catch {} }
     }

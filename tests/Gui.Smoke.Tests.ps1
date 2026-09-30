@@ -5,6 +5,7 @@ $cliRoot=Split-Path -Parent $PSScriptRoot
 $root=Join-Path ([IO.Path]::GetTempPath()) ('potato-gui-fixture-'+[guid]::NewGuid())
 New-Item -ItemType Directory $root | Out-Null
 $child=$null
+$broker=$null
 try {
     $fixture=Join-Path $root 'form.ps1'
     @'
@@ -27,9 +28,22 @@ public class MisreportedFocusFixture : OpaqueInputFixture {
         public override AccessibleStates State { get { return base.State & ~AccessibleStates.Focused; } }
     }
 }
+public class PacedInputFixture : OpaqueInputFixture {
+    System.Diagnostics.Stopwatch clock=System.Diagnostics.Stopwatch.StartNew();
+    long previous=-100; bool high;
+    protected override void OnKeyPress(KeyPressEventArgs e) {
+        if (e.KeyChar=='\r') {System.IO.File.WriteAllText(OutputPath,Received);Received="";previous=-100;high=false;return;}
+        long now=clock.ElapsedMilliseconds;
+        if (now-previous>=2 || (high && char.IsLowSurrogate(e.KeyChar))) {Received+=e.KeyChar;high=char.IsHighSurrogate(e.KeyChar);previous=now;}
+    }
+}
+public class SwitchingInputFixture : OpaqueInputFixture {
+    public Control Next;
+    protected override void OnKeyPress(KeyPressEventArgs e) {base.OnKeyPress(e);Next.Focus();}
+}
 "@
 $form=New-Object Windows.Forms.Form
-$form.Text=$Title; $form.Width=440; $form.Height=465
+$form.Text=$Title; $form.Width=440; $form.Height=575
 $field=New-Object Windows.Forms.TextBox
 $field.AccessibleName='Fixture input'; $field.Top=20; $field.Left=20; $field.Width=350
 $button=New-Object Windows.Forms.Button
@@ -75,6 +89,11 @@ $opaque.AccessibleName='Fixture opaque editor'; $opaque.SetBounds(20,210,350,45)
 $misreported=New-Object MisreportedFocusFixture
 $misreported.AccessibleName='Fixture native focus editor'; $misreported.SetBounds(20,325,350,45); $misreported.OutputPath=$Output+'.native'; $misreported.TabIndex=30
 $form.Controls.Add($misreported)
+$paced=New-Object PacedInputFixture
+$paced.AccessibleName='Fixture paced editor'; $paced.SetBounds(20,380,350,40); $paced.OutputPath=$Output+'.paced'
+$switcher=New-Object SwitchingInputFixture
+$switcher.AccessibleName='Fixture switching editor'; $switcher.SetBounds(20,430,350,40); $switcher.OutputPath=$Output+'.switch'; $switcher.Next=$field
+$form.Controls.AddRange(@($paced,$switcher))
 $duplicateButton=New-Object Windows.Forms.Button
 $duplicateButton.AccessibleName='Shared action'; $duplicateButton.Text='Shared'; $duplicateButton.SetBounds(20,275,120,30)
 $duplicateButton.Add_Click({[IO.File]::WriteAllText(($Output+'.unique'),'clicked')})
@@ -160,6 +179,21 @@ $form.Show(); $form.Hide()
     Invoke-Fixture press-key @('-Key','Enter','-FallbackReason','Observed opaque multiline fixture accepts Enter','-FallbackEvidence','fixture-native-focus-observation') | Out-Null
     Invoke-Fixture wait-file @('-Path',($output+'.native'),'-MinBytes','13','-StableMs','100','-TimeoutMs','3000') | Out-Null
     if ([IO.File]::ReadAllText($output+'.native') -cne "Native focus`r") { throw 'Native focus fallback did not deliver literal text and navigation to the real control.' }
+    Invoke-Fixture click @('-Name','Fixture paced editor','-Method','Mouse') | Out-Null
+    $pacedText=('abcdefghij'*8)+[char]::ConvertFromUtf32(0x1f642)
+    $paced=Invoke-Fixture type @('-TargetMode','Focused','-Text',$pacedText,'-FallbackReason','Observed rate-sensitive custom editor','-FallbackEvidence','fixture')
+    Invoke-Fixture press-key @('-Key','Enter','-FallbackReason','Commit fixture input','-FallbackEvidence','fixture') | Out-Null
+    Invoke-Fixture wait-file @('-Path',($output+'.paced'),'-TimeoutMs','2000','-MinBytes','1') | Out-Null
+    if ($paced.data.inputDelayMs -ne 5 -or [IO.File]::ReadAllText($output+'.paced') -cne $pacedText) {throw 'Default pacing lost characters in the rate-sensitive GUI fixture.'}
+    $legacy=Invoke-Fixture type @('-TargetMode','Focused','-Text',$pacedText,'-TypeByCharacter','-FallbackReason','Compare legacy pacing','-FallbackEvidence','fixture')
+    Invoke-Fixture press-key @('-Key','Enter','-FallbackReason','Commit fixture input','-FallbackEvidence','fixture') | Out-Null
+    if ($legacy.data.inputDelayMs -ne 50 -or [IO.File]::ReadAllText($output+'.paced') -cne $pacedText) {throw 'Legacy pacing split Unicode scalars or lost text.'}
+    "Pacing fixture ($($pacedText.Length) UTF-16 units): default=$($paced.durationMs) ms; legacy=$($legacy.durationMs) ms."
+    Invoke-Fixture type @('-Name','Fixture input','-Text','','-PreDelete','-Verify') | Out-Null
+    Invoke-Fixture click @('-Name','Fixture switching editor','-Method','Mouse') | Out-Null
+    $switched=Invoke-PotatoCliCommand type @('-TargetMode','Focused','-Text','stop after focus changes','-InputDelayMs','30','-FallbackReason','Observe focus change mid-input','-FallbackEvidence','fixture') -CliRoot $root -AsObject
+    $other=Invoke-Fixture read @('-Name','Fixture input')
+    if ($switched.ok -or $switched.error.type -ne 'InputFocusChanged' -or $switched.outcome -ne 'unknown' -or $other.data.text) {throw 'Paced typing continued into a different control or concealed partial dispatch.'}
     Invoke-Fixture click @('-Name','Fixture modal opener','-ControlType','Button','-Method','Invoke') | Out-Null
     $compact=Invoke-Fixture observe @('-Scope','FocusedWindow','-Format','Compact','-Depth','4','-MaxElements','40')
     if ($compact.data.root.name -ne 'Fixture modal' -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture cancel'}).Count -ne 1 -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture input'}).Count) { throw 'FocusedWindow compact observation escaped the owned dialog.' }
@@ -209,6 +243,26 @@ $form.Show(); $form.Hide()
         } finally { $original | Set-Content $statePath }
     } $root
     if ($foreignInput.ok -or $foreignInput.outcome -ne 'not-dispatched' -or $foreignInput.error.focus.owned) {throw 'Native focus fallback bypassed working application ownership.'}
+    $brokerTitle=$title+' broker'
+    $broker=Start-Process powershell.exe -ArgumentList @('-NoProfile','-STA','-File',('"'+$fixture+'"'),'-Title',('"'+$brokerTitle+'"'),'-Output',('"'+$output+'.broker"')) -PassThru -WindowStyle Hidden
+    $brokerReady=Invoke-Fixture wait-file @('-Path',($output+'.broker.ready'),'-TimeoutMs','10000','-MinBytes','1')
+    if (-not $brokerReady.data.conditionMet) {throw 'Broker fixture did not start.'}
+    $foreign=Invoke-PotatoCliCommand observe @('-Scope','FocusedWindow','-Format','Compact') -CliRoot $root -AsObject
+    if ($foreign.ok -or $foreign.error.type -ne 'ScopeNotReady') {throw 'External broker was implicitly adopted.'}
+    $brokerWindows=Invoke-Fixture windows @('-ProcessId',"$($broker.Id)")
+    $windowJson=@{Name=$brokerTitle;ClassName=$brokerWindows.data.windows[0].className;ProcessId=$broker.Id} | ConvertTo-Json -Compress
+    $scopeArgs=@('-Scope','ForegroundWindow','-WindowSelectorJson',$windowJson,'-FallbackReason','Observed system-hosted dialog fixture','-FallbackEvidence','fixture-window-observation')
+    $brokerView=Invoke-Fixture observe ($scopeArgs+@('-Format','Compact','-Depth','3','-MaxElements','60'))
+    if ($brokerView.data.root.name -ne $brokerTitle) {throw 'Explicit broker scope inspected the wrong window.'}
+    Invoke-Fixture click ($scopeArgs+@('-Name','Fixture save')) | Out-Null
+    if (-not (Test-Path ($output+'.broker'))) {throw 'Guarded broker selector did not invoke the visible control.'}
+    $state=Invoke-Fixture state @()
+    if ($state.data.state.working.processId -ne $child.Id) {throw 'Guarded scope changed the working process for cleanup.'}
+    $wrongScope=$scopeArgs.Clone(); $wrongScope[3]='{"Name":"wrong window","ClassName":"wrong class"}'
+    $mismatch=Invoke-PotatoCliCommand click ($wrongScope+@('-Name','Fixture save')) -CliRoot $root -AsObject
+    if ($mismatch.ok -or $mismatch.outcome -ne 'not-dispatched') {throw 'Mismatched foreground guard dispatched a click.'}
+    [void]$broker.CloseMainWindow(); if (-not $broker.WaitForExit(3000)) {throw 'Broker fixture did not close.'}
+    Invoke-Fixture focus @('-ProcessId',"$($child.Id)",'-WindowTitle',$title) | Out-Null
     Invoke-Fixture click @('-Name','Fixture arm close prompt') | Out-Null
     $close=Invoke-Fixture close-window @('-ProcessId',"$($child.Id)")
     if ($close.data.closeRequested -ne 1 -or $close.data.requests[0].method -ne 'WM_CLOSE') {throw 'Close did not return an asynchronous request receipt.'}
@@ -217,9 +271,11 @@ $form.Show(); $form.Hide()
     Invoke-Fixture click @('-Scope','FocusedWindow','-Name','OK','-ControlType','Button') | Out-Null
     Invoke-Fixture close-window @('-ProcessId',"$($child.Id)") | Out-Null
     if (-not $child.WaitForExit(3000)) { throw 'Fixture window did not close.' }
-    'GUI smoke: literal/focused input, false UIA focus with native keyboard input, foreign-owner rejection, paths, relative click, navigation, drag/drop, modal discovery, asynchronous close prompt and scoped closure passed.'
+    'GUI smoke: paced Unicode, focus-change abort, guarded external scope without adoption, literal/focused input, false UIA focus, ownership, paths, relative click, navigation, drag/drop, modal discovery and close prompts passed.'
 }
 finally {
+    if ($broker -and -not $broker.HasExited) {$broker.Kill();$broker.WaitForExit()}
+    if ($broker) {$broker.Dispose()}
     if ($child -and -not $child.HasExited) { $child.Kill(); $child.WaitForExit() }
     if ($child) {$child.Dispose()}
     $resolved=[IO.Path]::GetFullPath($root)

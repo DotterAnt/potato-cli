@@ -8,6 +8,12 @@ function Get-PotatoInteractionPolicy {
         (Get-PotatoArg $ArgsMap @('ClearMethod') 'Selection') -eq 'Shortcut')
     $reason = [string](Get-PotatoArg $ArgsMap @('FallbackReason') '')
     $evidence = [string](Get-PotatoArg $ArgsMap @('FallbackEvidence') '')
+    if ((Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') {
+        if ($Command -notin @('observe','select','read','wait-element','click')) { throw 'Guarded ForegroundWindow supports observation and selector clicks only; it never grants unscoped input or process ownership.' }
+        if ([string]::IsNullOrWhiteSpace($reason) -or [string]::IsNullOrWhiteSpace($evidence)) { throw 'ForegroundWindow requires FallbackReason and FallbackEvidence for the observed system-hosted GUI route.' }
+        if ((ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Focus')) $false) -or
+            (ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('ElementFocus')) $false)) { throw 'Guarded ForegroundWindow preserves focus; Focus/ElementFocus overrides are not allowed.' }
+    }
     if ($Command -eq 'type') {
         $text = Get-PotatoArg $ArgsMap @('Text')
         if ($null -eq $text -and $ArgsMap._.Count) { $text = $ArgsMap._[0] }

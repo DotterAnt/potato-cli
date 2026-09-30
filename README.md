@@ -4,6 +4,10 @@
 
 It does not import the old `Potato` module and does not include legacy testcases, browser automation, Selenium, image recognition, OCR, Jira integration, VM tooling, or application-specific cleanup helpers.
 
+Current reliability defaults: literal input uses a 5 ms delay per Unicode scalar, checking native focus while sending. `-InputDelayMs 0` explicitly requests bursts; `-TypeByCharacter` retains the legacy 50 ms delay. Use readback to verify content and preserve tested pacing in generated scripts. Filtered selector misses inside an application subtree now use the bounded child traversal used by observation; `SearchIncomplete` requires a narrower scope.
+
+For an observed system-hosted dialog, `-Scope ForegroundWindow -WindowSelectorJson '{"Name":"<exact title>","ClassName":"<exact class>"}'` with fallback reason/evidence permits observation and selector clicks without adopting the host process. It never grants unscoped typing or cleanup ownership. Scoped waits tolerate a foreground/owner transition; use `-InteractiveOnly` to wait for an enabled visible submit control, then verify the next dialog instead of repeating a blind click.
+
 ## Requirements
 
 - Windows with an interactive desktop session.
