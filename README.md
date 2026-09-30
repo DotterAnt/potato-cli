@@ -29,6 +29,10 @@ For agent discovery, use `observe -Format Compact -Depth 3 -MaxElements 80`: it 
 
 Read several needed topics in one call: `help -Topics start,observe,click,type,press-key`. For alternative discovery labels, use `select -SelectorJson '{"Name":["Save","Browse"]}' -TimeoutMs 0`. Use timed waits for expected transitions rather than repeated guesses. The framework's exploration Batch entrypoint records receipts and saves session configuration; its default compact output removes repeated envelope metadata while keeping full command envelopes on disk.
 
+Click now requires one visible enabled match by default. `AmbiguousTarget` returns candidates before any input, so a navigation item and submit button with the same name cannot silently substitute for each other. Add an observed role, class, ID or parent scope. Existing scripts with intentionally ambiguous selectors can explicitly request `-RequireUnique false` for legacy first-match behavior. Compact candidates include class names and distinguish duplicate labels where the returned tree provides enough information.
+
+For an observed opaque field already in focus, `type -TargetMode Focused -ExpectedFocusJson '{"AutomationId":"<observed-id>"}' -FocusTimeoutMs 2000` waits for that owned focus without clicking or changing its existing text selection. Fallback reason/evidence remain required. Prefer writable `type -PreDelete -Verify` for replacement when text patterns are available. `read` reports `data.textSource` so content assertions can distinguish actual text from an accessible name fallback.
+
 ## JSON Contract
 
 Every command writes exactly one compact JSON object to stdout.
@@ -49,7 +53,7 @@ Every command writes exactly one compact JSON object to stdout.
 }
 ```
 
-Agents and scripts should parse stdout as JSON and treat `ok: false` as a command failure. Human-readable logs are written separately.
+Agents and scripts should parse stdout as JSON and treat `ok: false` as a command failure. The script entrypoint now also exits 1 on these failures, including help errors. Combined help preserves valid requested topics when another is unknown, alongside `unknownTopics` and `availableTopics`. Human-readable logs are written separately.
 
 ## Runtime Files
 

@@ -22,7 +22,7 @@ public class OpaqueInputFixture : Control {
 }
 "@
 $form=New-Object Windows.Forms.Form
-$form.Text=$Title; $form.Width=440; $form.Height=340
+$form.Text=$Title; $form.Width=440; $form.Height=400
 $field=New-Object Windows.Forms.TextBox
 $field.AccessibleName='Fixture input'; $field.Top=20; $field.Left=20; $field.Width=350
 $button=New-Object Windows.Forms.Button
@@ -32,10 +32,14 @@ $modalButton=New-Object Windows.Forms.Button
 $modalButton.AccessibleName='Fixture modal opener'; $modalButton.Text='Open modal'; $modalButton.Top=70; $modalButton.Left=120; $modalButton.Width=110
 $modalButton.Add_Click({
     $dialog=New-Object Windows.Forms.Form
-    $dialog.Text='Fixture modal'; $dialog.Width=260; $dialog.Height=120
+    $dialog.Text='Fixture modal'; $dialog.Width=260; $dialog.Height=160
     $cancel=New-Object Windows.Forms.Button
     $cancel.Text='Cancel'; $cancel.AccessibleName='Fixture cancel'; $cancel.DialogResult=[Windows.Forms.DialogResult]::Cancel
     $dialog.Controls.Add($cancel)
+    $filename=New-Object Windows.Forms.TextBox
+    $filename.AccessibleName='Fixture filename'; $filename.Text='default.ext'; $filename.SetBounds(10,40,210,25)
+    $dialog.Controls.Add($filename)
+    $dialog.Add_Shown({$filename.Focus(); $filename.SelectAll()})
     try { [void]$dialog.ShowDialog($form) } finally { $dialog.Dispose() }
 })
 $field.TabIndex=0; $button.TabIndex=1; $modalButton.TabIndex=2
@@ -50,6 +54,12 @@ $drop.Add_DragEnter({ $_.Effect=[Windows.Forms.DragDropEffects]::Copy })
 $drop.Add_DragDrop({ [IO.File]::WriteAllText(($Output+'.drop'),[string]$_.Data.GetData([string])); $drop.Text='Dropped' })
 $opaque=New-Object OpaqueInputFixture
 $opaque.AccessibleName='Fixture opaque editor'; $opaque.SetBounds(20,210,350,45); $opaque.OutputPath=$Output+'.opaque'
+$duplicateButton=New-Object Windows.Forms.Button
+$duplicateButton.AccessibleName='Shared action'; $duplicateButton.Text='Shared'; $duplicateButton.SetBounds(20,275,120,30)
+$duplicateButton.Add_Click({[IO.File]::WriteAllText(($Output+'.unique'),'clicked')})
+$duplicateLabel=New-Object Windows.Forms.Label
+$duplicateLabel.AccessibleName='Shared action'; $duplicateLabel.Text='Shared'; $duplicateLabel.SetBounds(240,275,120,30)
+$form.Controls.AddRange(@($duplicateButton,$duplicateLabel))
 $form.Controls.AddRange(@($field,$button,$modalButton,$source,$drop,$opaque)); $form.Add_Shown({[IO.File]::WriteAllText(($Output+'.ready'),$form.Text); $field.Focus()})
 # Consume the hidden process startup window state before displaying the test form.
 $form.Show(); $form.Hide()
@@ -78,6 +88,14 @@ $form.Show(); $form.Hide()
     if (-not $owner.data.exists) { throw 'Window lookup missed the working window itself.' }
     $selected=Invoke-Fixture select @('-Name','Fixture input','-ControlType','Edit')
     if ($selected.data.count -ne 1) { throw 'Editable fixture discovery failed.' }
+    $ambiguous=Invoke-PotatoCliCommand click @('-Name','Shared action') -CliRoot $root -AsObject
+    if ($ambiguous.ok -or $ambiguous.error.type -ne 'AmbiguousTarget' -or $ambiguous.outcome -ne 'not-dispatched' -or $ambiguous.error.candidates.Count -ne 2 -or (Test-Path ($output+'.unique'))) { throw 'Ambiguous click dispatched input or failed to return candidates.' }
+    foreach ($values in @(@('-SelectorJson','{"Name":"Shared action","FindFirst":true}'),@('-PathJson','[{"Name":"Shared action"}]'))) {
+        $ambiguous=Invoke-PotatoCliCommand click $values -CliRoot $root -AsObject
+        if ($ambiguous.ok -or $ambiguous.error.type -ne 'AmbiguousTarget' -or (Test-Path ($output+'.unique'))) { throw 'JSON selector/path bypassed click uniqueness.' }
+    }
+    Invoke-Fixture click @('-SelectorJson','{"Name":"Shared action","ControlType":"Button"}') | Out-Null
+    if (-not (Test-Path ($output+'.unique'))) { throw 'Observed unique role did not resolve the ambiguous action.' }
     $unsupported=Invoke-PotatoCliCommand -Command click -Arguments @('-Name','Fixture input','-ControlType','Edit','-Method','Invoke') -CliRoot $root -AsObject
     if ($unsupported.ok -or $unsupported.error.message -notmatch 'InvokePattern is unavailable.*-Method Auto') { throw 'Unsupported InvokePattern did not produce an actionable error.' }
     $literal='Literal +^%~(){}[] text'
@@ -116,6 +134,12 @@ $form.Show(); $form.Hide()
     Invoke-Fixture click @('-Name','Fixture modal opener','-ControlType','Button','-Method','Invoke') | Out-Null
     $compact=Invoke-Fixture observe @('-Scope','FocusedWindow','-Format','Compact','-Depth','4','-MaxElements','40')
     if ($compact.data.root.name -ne 'Fixture modal' -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture cancel'}).Count -ne 1 -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture input'}).Count) { throw 'FocusedWindow compact observation escaped the owned dialog.' }
+    $guard=@('-TargetMode','Focused','-FallbackReason','Observed selected filename is already focused','-FallbackEvidence','fixture-observation')
+    $wrong=Invoke-PotatoCliCommand type ($guard+@('-Text','must not send','-ExpectedFocusJson','{"Name":"Absent"}','-FocusTimeoutMs','0')) -CliRoot $root -AsObject
+    $before=Invoke-Fixture read @('-Scope','FocusedWindow','-Name','Fixture filename')
+    if ($wrong.ok -or $before.data.text -ne 'default.ext' -or $before.data.textSource -notin @('ValuePattern','TextPattern')) { throw 'Wrong focus guard sent input or readback lost its text source.' }
+    $replacement=Invoke-Fixture type ($guard+@('-Text','replacement.ext','-ExpectedFocusJson','{"Name":"Fixture filename"}','-Verify'))
+    if (-not $replacement.data.verified) { throw 'Guarded focused typing did not preserve and replace the default selection.' }
     $scoped=Invoke-Fixture select @('-Scope','FocusedWindow','-Name','Fixture cancel','-TimeoutMs','0')
     if ($scoped.data.count -ne 1) { throw 'FocusedWindow select did not find the dialog control.' }
     $modal=Invoke-Fixture select @('-Name','Fixture cancel','-ControlType','Button','-ProcessId',"$($child.Id)",'-ModalOnly','-TimeoutMs','2000')

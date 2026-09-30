@@ -400,6 +400,7 @@ function Test-PotatoElementMatch {
 
     $regex = ConvertTo-PotatoBool $Selector.Regex $false
     $current = $Element.Current
+    if ($Selector.InteractiveOnly -and ($current.IsOffscreen -or -not $current.IsEnabled)) { return $false }
     if ($Selector.ModalOnly -and -not (Test-PotatoModalAncestor $Element)) { return $false }
     if ($Selector.ProcessId -and $current.ProcessId -ne [int]$Selector.ProcessId) { return $false }
     $controlName = Get-PotatoControlTypeName -Element $Element
@@ -482,6 +483,10 @@ function New-PotatoSearchCondition {
     if (ConvertTo-PotatoBool $Selector.Regex $false) { return [System.Windows.Automation.Condition]::TrueCondition }
 
     if ($Selector.ProcessId) { $conditions += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$Selector.ProcessId) }
+    if ($Selector.InteractiveOnly) {
+        $conditions += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::IsOffscreenProperty, $false)
+        $conditions += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::IsEnabledProperty, $true)
+    }
     # Push exact type predicates as well as strings. OR with the localized name
     # preserves the existing public matcher while avoiding marshaling every cell.
     if ($Selector.ControlType -and @($Selector.ControlType | Where-Object { "$_" -match '[\*\?\[]' }).Count -eq 0) {
@@ -523,7 +528,8 @@ function Find-PotatoElement {
 
         [switch] $FindFirst,
         [int] $MaxResults = 0,
-        [switch] $RefreshWorkingParent
+        [switch] $RefreshWorkingParent,
+        [switch] $RefreshFocusedParent
     )
 
     if (-not $Parent) {
@@ -562,6 +568,7 @@ function Find-PotatoElement {
                     continue
                 }
             }
+            if ($RefreshFocusedParent -and $attempt -gt 0) { $Parent=Get-PotatoFocusedWindow }
             $attempt++
             if ($firstOnly -and $exact) { $collection = @($Parent.FindFirst($scope, $condition)) | Where-Object { $null -ne $_ } }
             else { $collection = $Parent.FindAll($scope, $condition) }
@@ -592,7 +599,8 @@ function Resolve-PotatoSelectorPath {
     param(
         [object] $Path,
         [object] $StartParent = $null,
-        [int] $DefaultTimeoutMs = 1000
+        [int] $DefaultTimeoutMs = 1000,
+        [switch] $RequireUnique
     )
 
     $parent = $StartParent
@@ -612,7 +620,14 @@ function Resolve-PotatoSelectorPath {
         if ($null -eq $selector.FindFirst) { $selector | Add-Member -NotePropertyName FindFirst -NotePropertyValue $true -Force }
         if ($null -eq $selector.TimeoutMs) { $selector | Add-Member -NotePropertyName TimeoutMs -NotePropertyValue $DefaultTimeoutMs -Force }
 
-        $found = @(Find-PotatoElement -Selector $selector -Parent $parent -FindFirst -TimeoutMs (ConvertTo-PotatoInt $selector.TimeoutMs $DefaultTimeoutMs)) | Select-Object -First 1
+        if ($RequireUnique) {
+            $selector=Get-PotatoUniqueSelector $selector
+            $matches=@(Find-PotatoElement -Selector $selector -Parent $parent -MaxResults 8 -TimeoutMs (ConvertTo-PotatoInt $selector.TimeoutMs $DefaultTimeoutMs))
+            Assert-PotatoUniqueMatches $matches
+            $found=$matches | Select-Object -First 1
+        } else {
+            $found = @(Find-PotatoElement -Selector $selector -Parent $parent -FindFirst -TimeoutMs (ConvertTo-PotatoInt $selector.TimeoutMs $DefaultTimeoutMs)) | Select-Object -First 1
+        }
         if (-not $found) {
             return [ordered]@{ ok = $false; element = $null; failedIndex = $i; failedSelector = $selector }
         }
@@ -1070,7 +1085,7 @@ function Invoke-PotatoObserve {
         return [ordered]@{scope=(Get-PotatoArg $ArgsMap @('Scope') 'Working');
             root=$(if ($root) { ConvertTo-PotatoElementInfo $root });
             focusedElement=(ConvertTo-PotatoCompactElement (Get-PotatoForegroundWindowInfo));
-            elements=@(ConvertTo-PotatoCompactTree $tree); limitReached=($remaining.Value -le 0);
+            elements=@(Get-PotatoCompactElements $tree); limitReached=($remaining.Value -le 0);
             hint='Selectors are candidates within this scope; check uniqueness. Use click Auto. Add constraints only to disambiguate observed matches.'}
     }
     $windows = @(Get-PotatoTopLevelWindows)
@@ -1116,7 +1131,8 @@ function Resolve-PotatoCommandTarget {
     $parent = $null
     $scopeRoot = Get-PotatoExplicitScope $ArgsMap
     if (-not $scopeRoot -and $selector.ModalOnly) { $scopeRoot=Get-PotatoRootElement }
-    $pathResult = Resolve-PotatoSelectorPath -Path $path -StartParent $scopeRoot
+    $unique=ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('RequireUnique')) $false
+    $pathResult = Resolve-PotatoSelectorPath -Path $path -StartParent $scopeRoot -RequireUnique:$unique
     if (-not $pathResult.ok) {
         return [ordered]@{ ok = $false; error = "Selector path failed at index $($pathResult.failedIndex)."; element = $null; selector = $selector }
     }
@@ -1128,6 +1144,15 @@ function Resolve-PotatoCommandTarget {
     }
 
     $refresh = -not $path -and -not $scopeRoot -and [bool]$script:CurrentState.working
+    if ($unique) {
+        # FindFirst in a selector must not silently override an explicit
+        # cardinality check. Two matches suffice to reject before any input.
+        $selector=Get-PotatoUniqueSelector $selector
+        $matches=@(Find-PotatoElement -Selector $selector -Parent $parent -MaxResults 8 -TimeoutMs (ConvertTo-PotatoInt $selector.TimeoutMs 1000) -RefreshWorkingParent:$refresh)
+        Assert-PotatoUniqueMatches $matches
+        if (-not $matches.Count) { return @{ok=$false;error='No visible enabled element matches the selector.';element=$null;selector=$selector} }
+        return @{ok=$true;element=$matches[0];selector=$selector}
+    }
     $found = @(Find-PotatoElement -Selector $selector -Parent $parent -FindFirst -TimeoutMs (ConvertTo-PotatoInt $selector.TimeoutMs 1000) -RefreshWorkingParent:$refresh) | Select-Object -First 1
     if (-not $found) {
         return [ordered]@{ ok = $false; error = 'No matching element was found.'; element = $null; selector = $selector }
@@ -1157,7 +1182,8 @@ function Invoke-PotatoSelect {
     $findFirst = ConvertTo-PotatoBool $selector.FindFirst $false
     if ($maxResults -lt 1 -or $maxResults -gt 1000) { throw 'MaxResults must be 1..1000.' }
     $refresh = -not $inputs.path -and -not $scopeRoot -and [bool]$script:CurrentState.working
-    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh) |
+    $refreshFocus = -not $inputs.path -and (Get-PotatoArg $ArgsMap @('Scope') 'Working') -eq 'FocusedWindow'
+    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus) |
         Select-Object -First $maxResults
 
     [ordered]@{
@@ -1299,6 +1325,7 @@ function Invoke-PotatoClick {
         [hashtable] $ArgsMap
     )
 
+    if (-not $ArgsMap.ContainsKey('RequireUnique')) { $ArgsMap.RequireUnique=$true }
     $target = Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
     if (-not $target.ok) { throw $target.error }
 
@@ -1492,6 +1519,10 @@ function Invoke-PotatoType {
     $targetMode = [string](Get-PotatoArg $ArgsMap @('TargetMode') 'Writable')
     if ($targetMode -notin @('Writable','Focused')) { throw 'TargetMode must be Writable or Focused.' }
     $opaque = $targetMode -eq 'Focused'
+    $expectedFocus=Get-PotatoArg $ArgsMap @('ExpectedFocusJson')
+    if ($expectedFocus -and -not $opaque) { throw 'ExpectedFocusJson is for TargetMode Focused. Writable typing already resolves and focuses its selector.' }
+    $hasTargetSelector = @('SelectorJson','PathJson','AutomationId','Name','ControlType','ClassName','Class','WindowTitle') | Where-Object { $ArgsMap.ContainsKey($_) }
+    if ($opaque -and ($hasTargetSelector -or $focus -or $preDelete -or $requestedFocusMethod -ne 'Auto')) { throw 'TargetMode Focused preserves existing focus: no selector, Focus, FocusMethod override, or PreDelete. Visibly focus the editor first.' }
     [void](Get-PotatoWorkingElement -Required)
 
     if ($focus) {
@@ -1500,8 +1531,7 @@ function Invoke-PotatoType {
     }
 
     $element = [System.Windows.Automation.AutomationElement]::FocusedElement
-    $hasTargetSelector = @('SelectorJson','PathJson','AutomationId','Name','ControlType','ClassName','Class','WindowTitle') | Where-Object { $ArgsMap.ContainsKey($_) }
-    if ($opaque -and ($hasTargetSelector -or $focus -or $preDelete -or $requestedFocusMethod -ne 'Auto')) { throw 'TargetMode Focused preserves existing focus: no selector, Focus, FocusMethod override, or PreDelete. Visibly focus the editor first.' }
+    if ($expectedFocus) { $element=Wait-PotatoExpectedFocus $expectedFocus (ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('FocusTimeoutMs')) 2000) }
     $usedFocusMethod = 'ExistingFocus'
     if ($hasTargetSelector) {
         $target = Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
@@ -1755,20 +1785,27 @@ function Get-PotatoElementText {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [object] $Element
+        [object] $Element,
+        [switch] $WithSource
     )
 
     try {
         $valuePattern = $Element.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern)
-        if ($valuePattern) { return $valuePattern.Current.Value }
+        if ($valuePattern) {
+            $value=$valuePattern.Current.Value
+            if ($WithSource) { return @{text=$value;source='ValuePattern'} }; return $value
+        }
     }
     catch {}
     try {
         $textPattern = $Element.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
-        if ($textPattern) { return $textPattern.DocumentRange.GetText(-1) }
+        if ($textPattern) {
+            $value=$textPattern.DocumentRange.GetText(-1)
+            if ($WithSource) { return @{text=$value;source='TextPattern'} }; return $value
+        }
     }
     catch {}
-    return $Element.Current.Name
+    if ($WithSource) { return @{text=$Element.Current.Name;source='Name'} }; return $Element.Current.Name
 }
 
 function Invoke-PotatoRead {
@@ -1780,9 +1817,10 @@ function Invoke-PotatoRead {
 
     $target = Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
     if (-not $target.ok) { throw $target.error }
-    $text = Get-PotatoElementText -Element $target.element
+    $readback = Get-PotatoElementText -Element $target.element -WithSource
     [ordered]@{
-        text = $text
+        text = $readback.text
+        textSource = $readback.source
         element = ConvertTo-PotatoElementInfo -Element $target.element
     }
 }
@@ -2046,15 +2084,17 @@ function Invoke-PotatoCliCommandCore {
             if ($topics) {
                 if ($topic) { throw 'Use Topic or Topics, not both.' }
                 $selected=[ordered]@{}
+                $unknown=@()
                 foreach ($item in ([string]$topics -split ',')) {
                     $item=$item.Trim()
-                    if ($help.commands.PSObject.Properties.Name -notcontains $item) { throw "Unknown help topic '$item'." }
+                    if ($help.commands.PSObject.Properties.Name -notcontains $item) { $unknown+=$item; continue }
                     $selected[$item]=$help.commands.$item
                 }
-                $result=@{commands=$selected;rules=$help.rules;globalOptions=$help.globalOptions;selectorOptions=$help.selectorOptions}
+                $result=@{commands=$selected;unknownTopics=$unknown;availableTopics=@($help.commands.PSObject.Properties.Name);rules=$help.rules;globalOptions=$help.globalOptions;selectorOptions=$help.selectorOptions}
+                if ($unknown.Count) { $ok=$false; $errorObject=@{message=('Unknown help topics: '+($unknown -join ', ')+'. Valid requested topics are in data.commands; choose from data.availableTopics.');type='HelpError'} }
             }
             elseif ($topic) {
-                if ($help.commands.PSObject.Properties.Name -notcontains $topic) { throw "Unknown help topic '$topic'." }
+                if ($help.commands.PSObject.Properties.Name -notcontains $topic) { $result=@{availableTopics=@($help.commands.PSObject.Properties.Name)}; throw "Unknown help topic '$topic'. See data.availableTopics." }
                 $result = @{ topic = $topic; help = $help.commands.$topic; rules = $help.rules; globalOptions = $help.globalOptions; selectorOptions = $help.selectorOptions }
             }
             else { $result = $help }
@@ -2140,6 +2180,11 @@ function Invoke-PotatoCliCommandCore {
             message = $_.Exception.Message
             type = $(if (-not $policy) { 'InteractionPolicyViolation' } else { $_.Exception.GetType().FullName })
             category = [string]$_.CategoryInfo.Category
+        }
+        if ($_.Exception.Data['PotatoErrorType']) {
+            $errorObject.type=$_.Exception.Data['PotatoErrorType']
+            $errorObject.candidates=$_.Exception.Data['candidates']
+            if ($_.Exception.Data['NoInputSent']) { $dispatched=$false }
         }
         if ($script:CurrentState) { try { Write-PotatoLog -Command $normalized -Level Error -Message $errorObject.message } catch {} }
     }

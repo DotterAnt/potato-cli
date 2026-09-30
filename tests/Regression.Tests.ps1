@@ -112,8 +112,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $cliRoot 'potato.ps1') -Destination $mockRoot
     @'
 function Invoke-PotatoCliCommand {
-    param($Command, $Arguments, $CliRoot)
-    @{command=$Command;arguments=@($Arguments)} | ConvertTo-Json -Compress
+    param($Command, $Arguments, $CliRoot, [switch]$AsObject)
+    $value=@{ok=$true;command=$Command;arguments=@($Arguments)}
+    if ($AsObject) { return $value }; $value | ConvertTo-Json -Compress
 }
 Export-ModuleMember -Function Invoke-PotatoCliCommand
 '@ | Set-Content -LiteralPath (Join-Path $mockRoot 'PoTAToCli\PoTAToCli.psm1') -Encoding UTF8
