@@ -36,7 +36,15 @@ $module = Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -
     }
     Reject { Get-PotatoInteractionPolicy @{ProcessName='example.document'} start } 'File association launch accepted.'
     Reject { Get-PotatoInteractionPolicy @{Text=[string][char]22} type } 'Clipboard control character accepted as text.'
-    Check ((Get-PotatoInteractionPolicy @{Text='^s literal'} type).mode -eq 'VisibleControls') 'Literal text was treated as hotkey.'
+    Check ((Get-PotatoInteractionPolicy @{Text='^s literal'} type).mode -eq 'GuiNavigation') 'Literal text was treated as hotkey.'
+    Reject { Get-PotatoInteractionPolicy @{InteractionPolicy='VisibleControls';Key='Enter'} press-key } 'Strict policy accepted navigation.'
+    Reject { Get-PotatoInteractionPolicy @{TargetMode='Focused';Text='literal'} type } 'Opaque input lost its audit requirement.'
+    $navigation=@{Key='Enter';FallbackReason='Commit observed editor';FallbackEvidence='fixture.png'}
+    Check (Get-PotatoInteractionPolicy $navigation press-key).navigationUsed 'Navigation was not classified separately.'
+    $opaque=@{TargetMode='Focused';Text='literal';FallbackReason='Opaque editor';FallbackEvidence='fixture.png'}
+    Check (Get-PotatoInteractionPolicy $opaque type).opaqueTyping 'Opaque input was not recorded.'
+    Reject { Invoke-PotatoPressKey @{Key='F4'} } 'Application key was accepted as navigation.'
+    Reject { Invoke-PotatoPressKey @{Key='Enter';Count=2} } 'Repeated submission was accepted.'
     $script:CurrentState = [pscustomobject]@{working=@{processId=$PID}}
     $field = [pscustomobject]@{Current=[pscustomobject]@{IsEnabled=$true;HasKeyboardFocus=$true;ProcessId=$PID;ControlType=[Windows.Automation.ControlType]::Edit}}
     $field | Add-Member ScriptMethod TryGetCurrentPattern { param($id,$value) $value.Value=[pscustomobject]@{Current=@{IsReadOnly=$false}}; return $true }
@@ -46,6 +54,24 @@ $module = Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -
     Reject { Assert-PotatoTextTarget $field 'literal' } 'Unfocused input accepted.'
     $field.Current.HasKeyboardFocus=$true; $field.Current.ProcessId=-1
     Reject { Assert-PotatoTextTarget $field 'literal' } 'Wrong-process input accepted.'
+    $field.Current.ProcessId=$PID
+    $field | Add-Member ScriptMethod TryGetCurrentPattern { param($id,$value) return $false } -Force
+    Reject { Assert-PotatoTextTarget $field 'literal' } 'Opaque target silently bypassed writable checks.'
+    Assert-PotatoTextTarget $field 'literal' -AllowOpaque $true; $script:checks++
+    Reject { Assert-PotatoTextTarget $field "literal`n" -AllowOpaque $true } 'Focused input accepted hidden Enter.'
+    $field | Add-Member ScriptMethod TryGetCurrentPattern { param($id,$value) $value.Value=[pscustomobject]@{Current=@{IsReadOnly=$true}}; return $true } -Force
+    Reject { Assert-PotatoTextTarget $field 'literal' -AllowOpaque $true } 'Focused input bypassed explicit read-only.'
+    $rectElement=[pscustomobject]@{Current=@{BoundingRectangle=@{X=-200;Y=30;Width=201;Height=101}}}
+    $rectElement | Add-Member ScriptMethod GetClickablePoint { throw 'No point' }
+    $point=Get-PotatoClickPoint $rectElement -RelativeX 0.5 -RelativeY 1
+    Check ($point.x -eq -100 -and $point.y -eq 130) 'Relative click did not use live element bounds.'
+    Reject { Get-PotatoClickPoint $rectElement -RelativeX 1.1 -RelativeY 0 } 'Relative click escaped element.'
+    Reject { Get-PotatoClickPoint $rectElement -RelativeX ([double]::NaN) -RelativeY 0 } 'Relative click accepted NaN.'
+    Reject { Get-PotatoClickPoint $rectElement -RelativeX 0 } 'Relative click accepted incomplete geometry.'
+    $fakeWindow=[pscustomobject]@{Current=@{ProcessId=$PID}}
+    Check (-not (Test-PotatoLaunchedWindow $fakeWindow '' @() ([datetime]::MinValue))) 'Empty launcher name matched a window.'
+    Check (-not (Test-PotatoLaunchedWindow $fakeWindow 'unrelated-process' @() ([datetime]::MinValue))) 'Unrelated window accepted as launched app.'
+    Check (-not (Test-PotatoLaunchedWindow $fakeWindow (Get-Process -Id $PID).ProcessName @($PID) ([datetime]::MinValue))) 'Pre-existing window accepted as owned launch.'
     Check (-not (Test-PotatoTypedTextMatch "first`r`nsecond" "first`nsecond" Exact)) 'Exact mode hid line-ending differences.'
     Check (Test-PotatoTypedTextMatch "first`r`nsecond" "first`nsecond" NormalizedExact) 'Normalized readback failed.'
     Check (Test-PotatoTypedTextMatch "prefix`r`nmarker`r`nend" "marker`nend" NormalizedContains) 'Normalized containment failed.'

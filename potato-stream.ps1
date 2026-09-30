@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string] $CliRoot)
+param([string] $CliRoot, [switch] $ContinueOnError)
 
 $ErrorActionPreference = 'Stop'
 if (-not $CliRoot) { $CliRoot = $PSScriptRoot }
@@ -33,5 +33,7 @@ while ($null -ne ($line = [Console]::ReadLine())) {
     }
     if ($null -ne $requestId) { $response['requestId'] = $requestId }
     [Console]::WriteLine(($response | ConvertTo-Json -Depth 80 -Compress))
+    $conditionFailed=($command -eq 'wait-element' -and -not $response.data.exists) -or ($command -eq 'wait-file' -and -not $response.data.conditionMet)
+    if ((-not $response.ok -or $conditionFailed) -and -not $ContinueOnError) { exit 1 }
     if ($command -eq 'quit' -and $response.ok) { break }
 }

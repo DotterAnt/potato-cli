@@ -134,6 +134,10 @@ Export-ModuleMember -Function Invoke-PotatoCliCommand
         throw ("Sequential CLI stream failed: exit=$LASTEXITCODE count=$($streamResults.Count) ids=$(@($streamResults | ForEach-Object { $_.requestId }) -join ',') ok=$(@($streamResults | ForEach-Object { $_.ok }) -join ',') firstError=$($streamResults[0].error.message).")
     }
     'CLI stream checks: 1 passed'
+    $badBatch=@('{"command":"help","arguments":["-Topic","missing"]}','{"command":"help","arguments":["-Topic","type"]}')
+    $stopped=@($badBatch | & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $cliRoot 'potato-stream.ps1') | ForEach-Object { $_ | ConvertFrom-Json })
+    if ($LASTEXITCODE -ne 1 -or $stopped.Count -ne 1 -or $stopped[0].ok) { throw 'Stream continued a dependent batch after failure.' }
+    'CLI stream failure-stop check: passed'
 }
 finally {
     # testRoot is an explicitly created unique temp directory; verify before recursion.

@@ -447,19 +447,23 @@ function Get-PotatoWorkingElement {
         $handle = [IntPtr]([int64]$state.working.nativeWindowHandle)
         try {
             $element = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
-            if ($element) { return $element }
+            if ($element -and $element.Current.ProcessId -eq $state.working.processId) { return $element }
         }
         catch {}
     }
 
     $selector = [ordered]@{
-        ProcessName = $state.working.processName
-        Name = $state.working.title
+        ProcessId = $state.working.processId
+        ControlType = 'Window'
         Recurse = $false
         FindFirst = $true
         TimeoutMs = 100
     }
-    return @(Find-PotatoElement -Selector $selector -Parent (Get-PotatoRootElement) -TimeoutMs 100 -FindFirst) | Select-Object -First 1
+    if (-not $selector.ProcessId) { throw 'Working window has no process identity. Run focus with an explicit selector.' }
+    $replacement = @(Find-PotatoElement -Selector $selector -Parent (Get-PotatoRootElement) -TimeoutMs 100 -FindFirst) | Select-Object -First 1
+    if ($replacement) { [void](Set-PotatoWorkingWindow -Element $replacement); return $replacement }
+    if ($Required) { throw 'Working window no longer exists. Observe windows and focus the owned application explicitly.' }
+    return $null
 }
 
 function New-PotatoSearchCondition {
@@ -477,8 +481,19 @@ function New-PotatoSearchCondition {
     if (ConvertTo-PotatoBool $Selector.Regex $false) { return [System.Windows.Automation.Condition]::TrueCondition }
 
     if ($Selector.ProcessId) { $conditions += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$Selector.ProcessId) }
-    # Push exact string predicates to the UIA provider. Wildcards and localized
-    # control types still use the existing matcher, preserving their semantics.
+    # Push exact type predicates as well as strings. OR with the localized name
+    # preserves the existing public matcher while avoiding marshaling every cell.
+    if ($Selector.ControlType -and @($Selector.ControlType | Where-Object { "$_" -match '[\*\?\[]' }).Count -eq 0) {
+        $types=@()
+        foreach ($value in @($Selector.ControlType)) {
+            $type=$null
+            try { $type=[System.Windows.Automation.ControlType]::$value } catch {}
+            if ($type) { $types += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty,$type) }
+            $types += New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::LocalizedControlTypeProperty,[string]$value,[System.Windows.Automation.PropertyConditionFlags]::IgnoreCase)
+        }
+        if ($types.Count -eq 1) { $conditions += $types[0] }
+        else { $conditions += New-Object System.Windows.Automation.OrCondition(,[System.Windows.Automation.Condition[]]$types) }
+    }
     foreach ($field in @('Name', 'AutomationId', 'ClassName', 'WindowTitle')) {
         $values = @($Selector.$field)
         if (-not $Selector.$field -or @($values | Where-Object { "$_" -match '[\*\?\[]' }).Count) { continue }
@@ -505,7 +520,8 @@ function Find-PotatoElement {
 
         [int] $TimeoutMs = -1,
 
-        [switch] $FindFirst
+        [switch] $FindFirst,
+        [int] $MaxResults = 0
     )
 
     if (-not $Parent) {
@@ -526,19 +542,26 @@ function Find-PotatoElement {
     }
     # Validate before the retry loop. An invalid regex must not become a silent miss.
     $condition = New-PotatoSearchCondition -Selector $Selector
+    $firstOnly = $FindFirst -or (ConvertTo-PotatoBool $Selector.FindFirst $false)
+    $exact = -not $Selector.Regex -and -not $Selector.ProcessName -and -not $Selector.ModalOnly
+    foreach ($field in @('Name','AutomationId','ClassName','WindowTitle','ControlType')) {
+        if (@($Selector.$field | Where-Object { "$_" -match '[\*\?\[]' }).Count) { $exact=$false }
+    }
     $stopAt = (Get-Date).AddMilliseconds($effectiveTimeout)
 
     do {
         $matches = @()
         try {
-            $collection = $Parent.FindAll($scope, $condition)
+            if ($firstOnly -and $exact) { $collection = @($Parent.FindFirst($scope, $condition)) | Where-Object { $null -ne $_ } }
+            else { $collection = $Parent.FindAll($scope, $condition) }
             foreach ($element in $collection) {
                 try { $matched = Test-PotatoElementMatch -Element $element -Selector $Selector } catch { continue }
                 if ($matched) {
                     $matches += $element
-                    if ($FindFirst -or (ConvertTo-PotatoBool $Selector.FindFirst $false)) {
+                    if ($firstOnly) {
                         return ,$matches[0]
                     }
+                    if ($MaxResults -gt 0 -and $matches.Count -ge $MaxResults) { break }
                 }
             }
         }
@@ -690,9 +713,10 @@ function Set-PotatoWorkingWindow {
         className = $info.className
         updatedAt = (Get-Date).ToString('o')
     }
-    if ($Process) {
-        $working.processName = $Process.ProcessName
-        $working.processId = $Process.Id
+    if ($Process -and $Process.Id -eq $info.processId) {
+        # A launcher can exit or hand off to another process. UIA owns the
+        # authoritative window identity, never the initial launcher PID.
+        if ($Process.ProcessName) { $working.processName = $Process.ProcessName }
         if (-not $working.title) { $working.title = $Process.MainWindowTitle }
         if (-not $working.nativeWindowHandle) { $working.nativeWindowHandle = $Process.MainWindowHandle.ToInt64() }
     }
@@ -783,29 +807,45 @@ function Wait-PotatoProcessWindow {
         [Parameter(Mandatory)]
         [System.Diagnostics.Process] $Process,
 
-        [int] $TimeoutMs = 15000
+        [int] $TimeoutMs = 15000,
+        [Parameter(Mandatory)] [string] $ExpectedProcessName,
+        [int[]] $ExcludedProcessIds = @(),
+        [datetime] $LaunchedAt = [datetime]::MinValue
     )
 
     $stopAt = (Get-Date).AddMilliseconds($TimeoutMs)
     do {
-        $Process.Refresh()
-        if ($Process.MainWindowHandle -and $Process.MainWindowHandle.ToInt64() -ne 0) {
+        try { $Process.Refresh() } catch {}
+        if (-not $Process.HasExited -and $Process.MainWindowHandle -and $Process.MainWindowHandle.ToInt64() -ne 0) {
             try {
-                return [System.Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+                $candidate = [System.Windows.Automation.AutomationElement]::FromHandle($Process.MainWindowHandle)
+                if (Test-PotatoLaunchedWindow $candidate $ExpectedProcessName $ExcludedProcessIds $LaunchedAt) { return $candidate }
             }
             catch {}
         }
         $selector = [ordered]@{
-            ProcessName = $Process.ProcessName
+            ProcessName = $ExpectedProcessName
+            ControlType = 'Window'
             Recurse = $false
             FindFirst = $true
         }
-        $window = @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs 100) | Select-Object -First 1
+        $window = @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs 100) | Where-Object { Test-PotatoLaunchedWindow $_ $ExpectedProcessName $ExcludedProcessIds $LaunchedAt } | Select-Object -First 1
         if ($window) { return $window }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $stopAt)
 
     return $null
+}
+
+function Test-PotatoLaunchedWindow {
+    param($Element, [string]$ExpectedProcessName, [int[]]$ExcludedProcessIds, [datetime]$LaunchedAt)
+    if (-not $Element -or -not $ExpectedProcessName) { return $false }
+    try {
+        $windowPid = [int]$Element.Current.ProcessId
+        if ($windowPid -le 0 -or $ExcludedProcessIds -contains $windowPid) { return $false }
+        $candidateProcess = Get-Process -Id $windowPid -ErrorAction Stop
+        return $candidateProcess.ProcessName -eq $ExpectedProcessName -and ($LaunchedAt -eq [datetime]::MinValue -or $candidateProcess.StartTime -ge $LaunchedAt.AddSeconds(-1))
+    } catch { return $false }
 }
 
 function Invoke-PotatoStart {
@@ -851,11 +891,16 @@ function Invoke-PotatoStart {
 
     $startParams = @{ FilePath = $(if ($filePath) { $filePath } else { $processName }); PassThru = $true }
     if ($arguments) { $startParams.ArgumentList = $arguments }
+    $launchedAt = Get-Date
     $started = Start-Process @startParams
-    $window = Wait-PotatoProcessWindow -Process $started -TimeoutMs $timeoutMs
+    # A windowless/failed handoff must not leave an earlier application as the
+    # text-input target of this successful launch command.
+    $script:CurrentState.working = $null
+    Save-PotatoState -State $script:CurrentState
+    $window = Wait-PotatoProcessWindow -Process $started -TimeoutMs $timeoutMs -ExpectedProcessName $targetProcessName -ExcludedProcessIds $existingIds -LaunchedAt $launchedAt
     $working = $null
     if ($window) {
-        $working = Set-PotatoWorkingWindow -Element $window -Process $started
+        $working = Set-PotatoWorkingWindow -Element $window
         [void](Show-PotatoWindow -Handle $working.nativeWindowHandle -Maximize:$maximize)
     }
 
@@ -872,7 +917,7 @@ function Invoke-PotatoStart {
     [ordered]@{
         process = [ordered]@{
             id = $started.Id
-            processName = $started.ProcessName
+            processName = $targetProcessName
             started = $true
         }
         working = $working
@@ -1061,7 +1106,8 @@ function Invoke-PotatoSelect {
     $selector = $inputs.selector
     $timeoutMs = ConvertTo-PotatoInt $selector.TimeoutMs 1000
     $findFirst = ConvertTo-PotatoBool $selector.FindFirst $false
-    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst) |
+    if ($maxResults -lt 1 -or $maxResults -gt 1000) { throw 'MaxResults must be 1..1000.' }
+    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults) |
         Select-Object -First $maxResults
 
     [ordered]@{
@@ -1157,13 +1203,20 @@ function Get-PotatoClickPoint {
 
         [int] $OffsetY = 0,
 
-        [bool] $OffsetClickablePoint = $true
+        [bool] $OffsetClickablePoint = $true,
+        [Nullable[double]] $RelativeX = $null,
+        [Nullable[double]] $RelativeY = $null
     )
 
     $clickable = $null
     try { $clickable = $Element.GetClickablePoint() } catch {}
     $rect = ConvertTo-PotatoRectangle $Element.Current.BoundingRectangle
     if (-not $rect) { throw 'Physical input requires finite, nonempty bounds.' }
+    if ($null -ne $RelativeX -or $null -ne $RelativeY) {
+        if ($null -eq $RelativeX -or $null -eq $RelativeY -or [double]::IsNaN($RelativeX) -or [double]::IsNaN($RelativeY) -or
+            $RelativeX -lt 0 -or $RelativeX -gt 1 -or $RelativeY -lt 0 -or $RelativeY -gt 1) { throw 'RelativeX and RelativeY must both be finite fractions in 0..1.' }
+        return [ordered]@{x=[int]($rect.x + [Math]::Round(($rect.width-1)*$RelativeX)); y=[int]($rect.y + [Math]::Round(($rect.height-1)*$RelativeY))}
+    }
     if ($clickable -and ([double]::IsNaN($clickable.X) -or [double]::IsInfinity($clickable.X) -or [double]::IsNaN($clickable.Y) -or [double]::IsInfinity($clickable.Y))) { $clickable = $null }
     if ($Center -or -not $clickable) {
         $x = $rect.X + ($rect.Width / 2)
@@ -1211,6 +1264,12 @@ function Invoke-PotatoClick {
     $offsetX = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('OffsetX')) 0
     $offsetY = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('OffsetY')) 0
     $offsetClickablePoint = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('OffsetClickablePoint')) $true
+    $relative = $ArgsMap.ContainsKey('RelativeX') -or $ArgsMap.ContainsKey('RelativeY')
+    if ($relative) {
+        if (-not $ArgsMap.ContainsKey('RelativeX') -or -not $ArgsMap.ContainsKey('RelativeY') -or $offsetX -ne 0 -or $offsetY -ne 0 -or $center -or $method -eq 'Invoke') { throw 'Relative clicks need RelativeX and RelativeY without offsets, Center, or Invoke.' }
+        # Validate geometry and fractions before moving focus or dispatching input.
+        [void](Get-PotatoClickPoint -Element $target.element -RelativeX ([double]$ArgsMap.RelativeX) -RelativeY ([double]$ArgsMap.RelativeY))
+    }
 
     if ($focus) {
         $working = Get-PotatoWorkingElement
@@ -1229,7 +1288,7 @@ function Invoke-PotatoClick {
         $invokePattern.Invoke()
         $action = 'InvokePattern'
     }
-    elseif ($method -eq 'Auto' -and $button -eq 'Left' -and $offsetX -eq 0 -and $offsetY -eq 0 -and -not $center) {
+    elseif ($method -eq 'Auto' -and $button -eq 'Left' -and $offsetX -eq 0 -and $offsetY -eq 0 -and -not $center -and -not $relative) {
         $action = Invoke-PotatoElementDefaultAction -Element $target.element
     }
     $point = $null
@@ -1237,7 +1296,8 @@ function Invoke-PotatoClick {
         if ($elementInfo.isOffscreen -or $elementInfo.boundingRectangle.width -le 0 -or $elementInfo.boundingRectangle.height -le 0) {
             throw 'Mouse click requires a visible, nonempty target rectangle.'
         }
-        $point = Get-PotatoClickPoint -Element $target.element -Center $center -OffsetX $offsetX -OffsetY $offsetY -OffsetClickablePoint $offsetClickablePoint
+        if ($relative) { $point = Get-PotatoClickPoint -Element $target.element -RelativeX ([double]$ArgsMap.RelativeX) -RelativeY ([double]$ArgsMap.RelativeY) }
+        else { $point = Get-PotatoClickPoint -Element $target.element -Center $center -OffsetX $offsetX -OffsetY $offsetY -OffsetClickablePoint $offsetClickablePoint }
         Move-PotatoMouse -X $point.x -Y $point.y
         Invoke-PotatoMouseClick -Button $button
         $action = 'Mouse'
@@ -1377,6 +1437,10 @@ function Invoke-PotatoType {
     if ($maxAttempts -lt 0 -or $maxAttempts -gt 1000) { throw 'MaxAttempts must be between 0 and 1000; 0 uses the verification deadline.' }
     $requestedFocusMethod = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('FocusMethod') -Default 'Auto')
     if ($requestedFocusMethod -notin @('Auto','UIA','Mouse')) { throw 'FocusMethod must be Auto, UIA, or Mouse.' }
+    $targetMode = [string](Get-PotatoArg $ArgsMap @('TargetMode') 'Writable')
+    if ($targetMode -notin @('Writable','Focused')) { throw 'TargetMode must be Writable or Focused.' }
+    $opaque = $targetMode -eq 'Focused'
+    [void](Get-PotatoWorkingElement -Required)
 
     if ($focus) {
         $working = Get-PotatoWorkingElement
@@ -1384,7 +1448,8 @@ function Invoke-PotatoType {
     }
 
     $element = [System.Windows.Automation.AutomationElement]::FocusedElement
-    $hasTargetSelector = $ArgsMap.ContainsKey('SelectorJson') -or $ArgsMap.ContainsKey('PathJson') -or $ArgsMap.ContainsKey('AutomationId') -or $ArgsMap.ContainsKey('Name') -or $ArgsMap.ContainsKey('ControlType')
+    $hasTargetSelector = @('SelectorJson','PathJson','AutomationId','Name','ControlType','ClassName','Class','WindowTitle') | Where-Object { $ArgsMap.ContainsKey($_) }
+    if ($opaque -and ($hasTargetSelector -or $focus -or $preDelete -or $requestedFocusMethod -ne 'Auto')) { throw 'TargetMode Focused preserves existing focus: no selector, Focus, FocusMethod override, or PreDelete. Visibly focus the editor first.' }
     $usedFocusMethod = 'ExistingFocus'
     if ($hasTargetSelector) {
         $target = Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
@@ -1406,7 +1471,11 @@ function Invoke-PotatoType {
         }
     }
     elseif ($requestedFocusMethod -ne 'Auto') { throw 'FocusMethod UIA or Mouse requires an explicit text target selector.' }
-    Assert-PotatoTextTarget -Element $element -Text ([string]$text)
+    $expectedProcessId = ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('ProcessId')) 0
+    if ($expectedProcessId -and $element.Current.ProcessId -ne $expectedProcessId) { throw 'Focused element does not match the requested ProcessId.' }
+    Assert-PotatoTextTarget -Element $element -Text ([string]$text) -AllowOpaque:$opaque
+    Assert-PotatoForegroundInput $element
+    $targetInfo = ConvertTo-PotatoElementInfo $element
     $clearMethod = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('ClearMethod') -Default 'Selection')
     if ($clearMethod -notin @('Selection', 'Shortcut')) { throw 'ClearMethod must be Selection or Shortcut.' }
     if ($verify) { [void](Get-PotatoEditableText -Element $element) }
@@ -1438,6 +1507,7 @@ function Invoke-PotatoType {
         }
     }
 
+    Assert-PotatoForegroundInput $element
     & $sendText $text $typeByCharacter
     $typedOk = $null
     $verification = $null
@@ -1449,7 +1519,7 @@ function Invoke-PotatoType {
     $script:CurrentState.lastAction = [ordered]@{ command = 'type'; ok = ($typedOk -ne $false); timestamp = (Get-Date).ToString('o') }
     Save-PotatoState -State $script:CurrentState
 
-    [ordered]@{ typed = $true; textLength = ([string]$text).Length; verified = $typedOk; verificationPerformed = $verify; verification = $verification; inputMethod = 'UnicodeKeyboard'; focusMethod = $usedFocusMethod; clearMethod = $(if ($preDelete) { $clearMethod } else { $null }) }
+    [ordered]@{ typed = $true; textLength = ([string]$text).Length; verified = $typedOk; verificationPerformed = $verify; verification = $verification; inputMethod = 'UnicodeKeyboard'; focusMethod = $usedFocusMethod; targetMode=$targetMode; target=$targetInfo; clearMethod = $(if ($preDelete) { $clearMethod } else { $null }) }
 }
 
 function Invoke-PotatoHotkey {
@@ -1477,19 +1547,43 @@ function Move-PotatoMouseSmooth {
         [int] $StartX,
         [int] $StartY,
         [int] $EndX,
-        [int] $EndY
+        [int] $EndY,
+        [int] $DurationMs = 300
     )
 
     $width = $EndX - $StartX
     $height = $EndY - $StartY
-    $steps = [Math]::Max(1, [Math]::Floor([Math]::Sqrt([Math]::Pow($height, 2) + [Math]::Pow($width, 2)) / 10))
+    $steps = [Math]::Max(1, [Math]::Ceiling($DurationMs / 10.0))
     for ($i = 0; $i -lt $steps; $i++) {
         $x = $StartX + (($width / $steps) * $i)
         $y = $StartY + (($height / $steps) * $i)
         Move-PotatoMouse -X ([int]$x) -Y ([int]$y)
-        Start-Sleep -Milliseconds 5
+        Start-Sleep -Milliseconds ([int][Math]::Max(1, $DurationMs / $steps))
     }
     Move-PotatoMouse -X $EndX -Y $EndY
+}
+
+function Resolve-PotatoDragEndpoint {
+    param([hashtable]$ArgsMap, [ValidateSet('Source','Target')][string]$Endpoint)
+    $selectorKey=$Endpoint+'SelectorJson'
+    $xKey=if ($Endpoint -eq 'Source') {'StartX'} else {'EndX'}
+    $yKey=if ($Endpoint -eq 'Source') {'StartY'} else {'EndY'}
+    if ($ArgsMap.ContainsKey($selectorKey)) {
+        if ($ArgsMap.ContainsKey($xKey) -or $ArgsMap.ContainsKey($yKey)) { throw "Use either $selectorKey or $xKey/$yKey, not both." }
+        $target=Resolve-PotatoCommandTarget -ArgsMap @{SelectorJson=$ArgsMap[$selectorKey]} -AllowPathAsTarget
+        if (-not $target.ok) { throw "$Endpoint drag selector failed: $($target.error)" }
+        $info=ConvertTo-PotatoElementInfo $target.element
+        if (-not $info.isEnabled -or $info.isOffscreen) { throw "$Endpoint drag element must be enabled and visible." }
+        $rx=Get-PotatoArg $ArgsMap @($Endpoint+'RelativeX') 0.5
+        $ry=Get-PotatoArg $ArgsMap @($Endpoint+'RelativeY') 0.5
+        $point=Get-PotatoClickPoint $target.element -RelativeX ([double]$rx) -RelativeY ([double]$ry)
+        return @{point=$point;element=$info}
+    }
+    if ($ArgsMap.ContainsKey($Endpoint+'RelativeX') -or $ArgsMap.ContainsKey($Endpoint+'RelativeY')) { throw "$Endpoint relative coordinates require $selectorKey." }
+    $x=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @($xKey)) ([int]::MinValue)
+    $y=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @($yKey)) ([int]::MinValue)
+    if ($x -eq [int]::MinValue -or $y -eq [int]::MinValue) { throw "drag requires $selectorKey or both $xKey and $yKey." }
+    return @{point=@{x=$x;y=$y};element=$null}
 }
 
 function Invoke-PotatoDrag {
@@ -1499,22 +1593,29 @@ function Invoke-PotatoDrag {
         [hashtable] $ArgsMap
     )
 
-    $startX = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('StartX')) ([int]::MinValue)
-    $startY = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('StartY')) ([int]::MinValue)
-    $endX = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('EndX')) ([int]::MinValue)
-    $endY = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('EndY')) ([int]::MinValue)
-    if (@($startX, $startY, $endX, $endY) -contains [int]::MinValue) { throw 'drag requires -StartX -StartY -EndX -EndY.' }
-    $smooth = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Smooth')) $false
+    # Resolve and validate BOTH endpoints before pressing any mouse button.
+    $source=Resolve-PotatoDragEndpoint $ArgsMap Source
+    $destination=Resolve-PotatoDragEndpoint $ArgsMap Target
+    $startX=$source.point.x; $startY=$source.point.y
+    $endX=$destination.point.x; $endY=$destination.point.y
+    $smooth = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Smooth')) $true
+    $durationMs=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('DurationMs')) 300
+    if ($durationMs -lt 50 -or $durationMs -gt 10000) { throw 'DurationMs must be 50..10000.' }
     if (-not (Initialize-PotatoNativeMouse)) {
         throw 'drag requires native mouse input, which is not available in this PowerShell session.'
     }
     Move-PotatoMouse -X $startX -Y $startY
-    Start-Sleep -Milliseconds 100
-    [PotatoMouseNative]::MouseEvent(0x0002, 0, 0, 0, 0)
-    Start-Sleep -Milliseconds 100
-    if ($smooth) { Move-PotatoMouseSmooth -StartX $startX -StartY $startY -EndX $endX -EndY $endY } else { Move-PotatoMouse -X $endX -Y $endY }
-    [PotatoMouseNative]::MouseEvent(0x0004, 0, 0, 0, 0)
-    [ordered]@{ dragged = $true; start = [ordered]@{ x = $startX; y = $startY }; end = [ordered]@{ x = $endX; y = $endY } }
+    Start-Sleep -Milliseconds 50
+    try {
+        [PotatoMouseNative]::MouseEvent(0x0002, 0, 0, 0, 0)
+        Start-Sleep -Milliseconds 50
+        if ($smooth) { Move-PotatoMouseSmooth -StartX $startX -StartY $startY -EndX $endX -EndY $endY -DurationMs $durationMs } else { Move-PotatoMouse -X $endX -Y $endY }
+    } finally {
+        # A provider/motion error must never leave the desktop mouse held down.
+        [PotatoMouseNative]::MouseEvent(0x0004, 0, 0, 0, 0)
+    }
+    [ordered]@{ dragged = $true; released=$true; verified=$null; verificationPerformed=$false;
+        start=$source.point; end=$destination.point; source=$source.element; target=$destination.element; durationMs=$durationMs; smooth=$smooth }
 }
 
 function Invoke-PotatoHover {
@@ -1647,7 +1748,13 @@ function New-PotatoScreenshot {
         [int] $Quality = 80
     )
 
+    $OutFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutFile)
+    $parent = Split-Path -Parent $OutFile
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     $bitmap = New-Object System.Drawing.Bitmap($Width, $Height)
+    $graphics = $null
+    $encoderParams = $null
+    try {
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $methodName = 'Copy' + 'FromScreen'
     $copyMethod = $graphics.GetType().GetMethod($methodName, [type[]]@([int], [int], [int], [int], [System.Drawing.Size]))
@@ -1661,8 +1768,11 @@ function New-PotatoScreenshot {
     $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
     $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter($encoder, [int64]$Quality)
     $bitmap.Save($OutFile, $codec, $encoderParams)
-    $graphics.Dispose()
-    $bitmap.Dispose()
+    } finally {
+        if ($encoderParams) { $encoderParams.Dispose() }
+        if ($graphics) { $graphics.Dispose() }
+        $bitmap.Dispose()
+    }
 }
 
 function Invoke-PotatoScreenshot {
@@ -1890,8 +2000,24 @@ function Invoke-PotatoCliCommandCore {
         try {
             $path = Get-PotatoArg -ArgsMap $argsMap -Names @('Path')
             if (-not $path) { throw 'read-pdf requires -Path.' }
-            $text = Read-PotatoPdfText -Path $path
-            $result = @{ path = (Get-Item -LiteralPath $path).FullName; text = $text }
+            $reader = [string](Get-PotatoArg $argsMap @('Reader') 'Auto')
+            if ($reader -notin @('Auto','Builtin','Python')) { throw 'Reader must be Auto, Builtin, or Python.' }
+            $pythonPath = [string](Get-PotatoArg $argsMap @('PythonPath') $env:POTATO_PDF_PYTHON)
+            $readerUsed='Builtin'; $builtinError=$null
+            if ($reader -ne 'Python') {
+                try { $text = Read-PotatoPdfText -Path $path }
+                catch { $builtinError=$_.Exception.Message; if ($reader -eq 'Builtin' -or -not $pythonPath) { throw } }
+            }
+            if ($reader -eq 'Python' -or $builtinError) {
+                if (-not $pythonPath -or -not (Test-Path -LiteralPath $pythonPath -PathType Leaf)) { throw 'Python reader needs -PythonPath pointing to an installed Python with pypdf.' }
+                $resolvedPdf=(Get-Item -LiteralPath $path -ErrorAction Stop).FullName
+                $raw = & $pythonPath (Join-Path $PSScriptRoot 'ReadPdf.py') $resolvedPdf 2>&1
+                $pythonExit=$LASTEXITCODE
+                $external=($raw -join "`n") | ConvertFrom-Json
+                if ($pythonExit -ne 0 -or -not $external.ok) { throw "PDF Python reader failed: $($external.error)" }
+                $text=[string]$external.text; $readerUsed='Python/pypdf'
+            }
+            $result = @{ path = (Get-Item -LiteralPath $path).FullName; text = $text; reader=$readerUsed; builtinError=$builtinError }
         }
         catch { $ok = $false; $errorObject = @{ message = $_.Exception.Message; type = 'PdfReadError' } }
         return @{ ok = $ok; command = $normalized; data = $result; error = $errorObject; session = $null; logPath = $null; durationMs = $watch.ElapsedMilliseconds }
@@ -1917,6 +2043,7 @@ function Invoke-PotatoCliCommandCore {
             'click-coordinate' { $result = Invoke-PotatoClickCoordinate -ArgsMap $argsMap }
             'type' { $result = Invoke-PotatoType -ArgsMap $argsMap }
             'hotkey' { $result = Invoke-PotatoHotkey -ArgsMap $argsMap }
+            'press-key' { $result = Invoke-PotatoPressKey -ArgsMap $argsMap }
             'drag' { $result = Invoke-PotatoDrag -ArgsMap $argsMap }
             'hover' { $result = Invoke-PotatoHover -ArgsMap $argsMap }
             'wait-element' { $result = Invoke-PotatoWaitElement -ArgsMap $argsMap }
@@ -1974,7 +2101,7 @@ function Invoke-PotatoCliCommandCore {
 
     $response = New-PotatoResult -Command $normalized -Ok $ok -Data $result -ErrorObject $errorObject -DurationMs $durationMs
     $response.interactionPolicy = $policy
-    $response.outcome = if (-not $dispatched) { 'not-dispatched' } elseif (-not $ok -and $normalized -in @('click','click-coordinate','type','hotkey','start','close-window','drag','focus')) { 'unknown' } else { 'completed' }
+    $response.outcome = if (-not $dispatched) { 'not-dispatched' } elseif (-not $ok -and $normalized -in @('click','click-coordinate','type','hotkey','press-key','start','close-window','drag','focus')) { 'unknown' } else { 'completed' }
     return $response
 }
 

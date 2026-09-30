@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "rules": [
     "Commands affecting one desktop must run sequentially, including screenshots taken after actions.",
     "ok reports command execution; assert data.exists, data.conditionMet or an application postcondition separately.",
@@ -7,7 +7,7 @@
     "Selectors are case-insensitive literal/wildcard matches by default. -Regex accepts regular expressions, not wildcard syntax.",
     "TimeoutMs bounds retries; an individual UI Automation provider call may exceed it.",
     "Use -Flag=value for values starting with a dash. Negative numeric values also work as separate tokens.",
-    "VisibleControls is the default and forbids hotkey (including dialog Enter) and Shortcut clearing. AllowShortcuts requires user/testcase authorization and per-action FallbackReason/FallbackEvidence; clipboard is unsupported.",
+    "GuiNavigation is the default: bounded press-key navigation and audited focused literal input use the GUI. Explicit VisibleControls stays strict and forbids press-key. Application hotkeys/Shortcut clearing require authorized AllowShortcuts; clipboard is unsupported.",
     "Commands use a bounded desktop mutex. DesktopBusy means not dispatched; outcome unknown requires observing the postcondition before retry.",
     "Invalid bounds are returned as null with boundsStatus/propertyErrors; do not infer missing UIA support from missing geometry."
   ],
@@ -57,24 +57,28 @@
       "notes": "Queries elements; it does not select a dropdown item. data.count=0 is a valid query result. Open a dropdown before looking for its items. Discover role before imposing a guessed ControlType; use ProcessId and ModalOnly for scoped dialog queries."
     },
     "click": {
-      "usage": "click <selector options> [-Method Auto|Mouse|Invoke] [-Center true] [-Button Left|Right] [-Focus false] [-ElementFocus false] [-OffsetX 0] [-OffsetY 0] [-VerifyDisappeared]",
-      "notes": "Use Auto unless a specific actuation method is required. Auto tries UIA patterns then a visible mouse click; Mouse uses live geometry. Invoke requires InvokePattern and reports supported patterns when unavailable. Methods are explicit; do not retry a possibly completed action without observing its result."
+      "usage": "click <selector options> [-Method Auto|Mouse|Invoke] [-RelativeX 0.5 -RelativeY 0.5] [-Center true] [-Button Left|Right] [-Focus false] [-ElementFocus false] [-OffsetX 0] [-OffsetY 0] [-VerifyDisappeared]",
+      "notes": "Auto tries UIA patterns then a visible mouse click; Mouse uses live geometry. RelativeX/Y select a point within live bounds (fractions 0..1, both required) and force mouse input; do not combine with offsets/Center/Invoke. For menus already open, Focus false and ElementFocus false avoid changing focus before the click. Observe the postcondition before retrying."
     },
     "click-coordinate": {
       "usage": "click-coordinate -X 100 -Y 100 [-Button Left|Right]",
       "notes": "Fallback only; retain a screenshot and explain the missing selector route."
     },
     "type": {
-      "usage": "type -Text 'literal text' [<selector options>] [-FocusMethod Auto|UIA|Mouse] [-PreDelete] [-ClearMethod Selection|Shortcut] [-Verify] [-VerifyMode Exact|Contains|NormalizedExact|NormalizedContains] [-VerifyTimeoutMs 3000] [-MaxAttempts 0] [-TypeByCharacter] [-Focus]",
-      "notes": "Sends literal Unicode keyboard events; no clipboard. With an explicit selector, Auto tries UIA focus then a visible mouse click if focus is unconfirmed; Mouse requests visible click focus directly. The target must be enabled, writable, and confirmed focused before any text is sent. A separate click is usually unnecessary. -Verify polls UIA readback up to VerifyTimeoutMs without resending input; MaxAttempts 0 uses the deadline. Normalized modes reconcile line endings. UseWildcardForVerify remains an alias for literal Contains. Failure returns verification attempts, observed length, and read error without exposing field contents. -TimeoutMs applies to selector lookup, not readback. PreDelete uses TextPattern selection plus Backspace by default; Shortcut clearing requires explicit allowance."
+      "usage": "type -Text 'literal text' [<selector options>] [-TargetMode Writable|Focused] [-FallbackReason <reason> -FallbackEvidence <reference>] [-FocusMethod Auto|UIA|Mouse] [-PreDelete] [-ClearMethod Selection|Shortcut] [-Verify] [-VerifyMode Exact|Contains|NormalizedExact|NormalizedContains] [-VerifyTimeoutMs 3000] [-MaxAttempts 0] [-TypeByCharacter] [-Focus]",
+      "notes": "Literal Unicode keyboard input, never clipboard. Writable mode is default and checks UIA writability/focus; selector Auto focus falls back to a visible click. Focused mode is an explicit audited fallback for an observed opaque editor: existing focus only, no selector/refocus/PreDelete/newlines/tabs, and explicit read-only still fails. Both modes check the actual foreground application or owned dialog. Verify polls current readback without resending or committing. For commit-on-exit controls, type once without Verify, commit through an observed control or permitted press-key Enter, then read/assert. Normalized modes reconcile line endings. TimeoutMs is lookup time; VerifyTimeoutMs is readback time. PreDelete uses TextPattern selection and Backspace; Shortcut clearing requires authorization."
+    },
+    "press-key": {
+      "usage": "press-key -Key Tab|ShiftTab|Enter|Escape|Left|Right|Up|Down [-Count 1] -FallbackReason <reason> -FallbackEvidence <reference>",
+      "notes": "GuiNavigation/AllowShortcuts only. Sends bounded navigation to confirmed focus in the working application or its owned dialog and returns focus before/after. Count is 1..20; Enter/Escape must be single actions followed by an observation. No application hotkeys, function keys, clipboard, key expressions, or implicit refocus. Required menu/button routes still apply. Dispatch does not verify the application postcondition."
     },
     "hotkey": {
       "usage": "hotkey -Keys ^s -InteractionPolicy AllowShortcuts -FallbackReason <reason> -FallbackEvidence <reference>",
       "notes": "Disabled by default, including Enter confirmations. One chord only, no grouped sequences or clipboard shortcuts. Requires user/testcase permission."
     },
     "drag": {
-      "usage": "drag -StartX 100 -StartY 100 -EndX 200 -EndY 200 [-Smooth]",
-      "notes": "Absolute coordinates; record fallback rationale and evidence."
+      "usage": "drag -SourceSelectorJson <selector> -TargetSelectorJson <selector> [-SourceRelativeX 0.5 -SourceRelativeY 0.5] [-TargetRelativeX 0.5 -TargetRelativeY 0.5] [-DurationMs 300] [-Smooth true] OR drag -StartX 100 -StartY 100 -EndX 200 -EndY 200",
+      "notes": "Click/hold, move, and drop using the left mouse button. Each endpoint can be a selector (including nested paths) or coordinates. Resolves both visible/enabled controls before pressing. Fractions choose a point inside current element bounds; defaults are centers. Movement is smooth by default; DurationMs is 50..10000. Always releases the button on failure. released/dragged mean input delivery; assert the actual drop result separately. Coordinate endpoints need observed fallback evidence."
     },
     "hover": {
       "usage": "hover <selector options> | hover -X 100 -Y 100"
@@ -92,8 +96,8 @@
       "notes": "Returns data.text from ValuePattern, TextPattern, or element name. Choose a meaningful expected-result assertion for the target."
     },
     "read-pdf": {
-      "usage": "read-pdf -Path 'document.pdf'",
-      "notes": "Returns data.path and data.text using built-in .NET only. Supports simple text PDFs such as Microsoft Print to PDF and Edge output, with ordinary objects, direct stream lengths, plain/FlateDecode streams and one/two-byte ToUnicode maps. Whitespace is approximate; text follows drawing order. No OCR, encryption, object/xref streams, incremental updates or Form XObjects. Unsupported input or no extractable text returns ok:false. Needs no desktop, takes no desktop lock and does not change session state."
+      "usage": "read-pdf -Path 'document.pdf' [-Reader Auto|Builtin|Python] [-PythonPath 'C:\\path\\python.exe']",
+      "notes": "Read-only text extraction; returns data.path, data.text, and data.reader. Auto tries the built-in simple PDF reader, then optional installed Python+pypdf if PythonPath or POTATO_PDF_PYTHON is configured. The shipped helper avoids inline-code quoting and never creates expected outputs. Builtin has no dependencies but rejects object/xref streams and other unsupported layouts. Neither reader performs OCR; missing/empty text fails. No desktop or session-state mutation."
     },
     "screenshot": {
       "usage": "screenshot [-OutFile 'evidence.png'] [<selector options>] [-X 0 -Y 0 -Width 800 -Height 600]",
@@ -109,9 +113,9 @@
     }
   },
   "globalOptions": {
-    "InteractionPolicy": "VisibleControls (default) or AllowShortcuts",
-    "FallbackReason": "Required explanation for every authorized shortcut",
-    "FallbackEvidence": "Required observation/screenshot reference for every authorized shortcut",
+    "InteractionPolicy": "GuiNavigation (default), VisibleControls (strict), or explicitly authorized AllowShortcuts",
+    "FallbackReason": "Required explanation for focused opaque typing, press-key, and authorized shortcuts",
+    "FallbackEvidence": "Required observation/screenshot reference for focused opaque typing, press-key, and authorized shortcuts",
     "LeaseTimeoutMs": "Desktop lock acquisition bound, 0..60000; default 15000"
   }
 }

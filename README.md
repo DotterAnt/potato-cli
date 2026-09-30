@@ -1,6 +1,6 @@
 # PoTATo Agent CLI
 
-`potato_cli` is a standalone PowerShell command-line interface for agent-driven Windows UI automation. It is intentionally smaller than the original PoTATo project: it keeps the UI Automation, window, selector, input, screenshot, report, log, and state primitives needed to build repeatable GUI tests for Office and Nucleus-style desktop applications.
+`potato-cli` is a standalone PowerShell command-line interface for agent-driven Windows UI automation. It is intentionally smaller than the original PoTATo project: it keeps the UI Automation, window, selector, input, screenshot, report, log, and state primitives needed to build repeatable GUI tests for Office and Nucleus-style desktop applications.
 
 It does not import the old `Potato` module and does not include legacy testcases, browser automation, Selenium, image recognition, OCR, Jira integration, VM tooling, or application-specific cleanup helpers.
 
@@ -14,7 +14,7 @@ It does not import the old `Potato` module and does not include legacy testcases
 ## Entry Point
 
 ```powershell
-cd C:\diplomamunka\potato_cli
+cd C:\diplomamunka\potato-cli
 .\potato.ps1 <command> [parameters]
 ```
 
@@ -34,14 +34,14 @@ Every command writes exactly one compact JSON object to stdout.
   "ok": true,
   "command": "observe",
   "session": {
-    "statePath": "C:\\diplomamunka\\potato_cli\\.state\\default.json",
+    "statePath": "C:\\diplomamunka\\potato-cli\\.state\\default.json",
     "runId": "...",
     "working": {}
   },
   "data": {},
   "error": null,
   "durationMs": 123,
-  "logPath": "C:\\diplomamunka\\potato_cli\\runs\\...\\potato.log"
+  "logPath": "C:\\diplomamunka\\potato-cli\\runs\\...\\potato.log"
 }
 ```
 
@@ -49,7 +49,7 @@ Agents and scripts should parse stdout as JSON and treat `ok: false` as a comman
 
 ## Runtime Files
 
-The CLI creates runtime state and evidence below `potato_cli`:
+The CLI creates runtime state and evidence below `potato-cli`:
 
 - `.state\default.json` stores the current run ID and working window context.
 - `runs\<runId>\potato.log` stores command logs as JSON lines.
@@ -76,7 +76,8 @@ Run `potato.ps1 help` for JSON command guidance, or `potato.ps1 help -Topic type
 | `click-coordinate` | Click absolute screen coordinates. Use only as a documented fallback. |
 | `type` | Type text into the currently focused control. |
 | `hotkey` | Send one explicitly authorized chord; blocked by default. |
-| `drag` | Drag between two absolute screen coordinates. |
+| `press-key` | Bounded, audited navigation with confirmed foreground focus. |
+| `drag` | Press, move, and drop between live element selectors or coordinates. |
 | `hover` | Move the mouse over an element or coordinate. |
 | `wait-element` | Wait for an element selector to appear. |
 | `wait-file` | Wait for a file to appear or disappear. |
@@ -211,7 +212,26 @@ Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Regression.Te
 
 ## Policy, transport, and discovery
 
-Every command defaults to `-InteractionPolicy VisibleControls`. Ordinary `type` is literal, never clipboard-based, and requires an enabled, writable field with verified keyboard focus in the working process. Newlines/tabs are limited to Document controls; they cannot submit a filename dialog. `-ClearMethod Shortcut` requires AllowShortcuts just like `hotkey`. For an explicitly authorized exception, supply `-InteractionPolicy AllowShortcuts -FallbackReason <reason> -FallbackEvidence <reference>`. Failed discovery does not itself authorize an exception.
+Every command defaults to `-InteractionPolicy GuiNavigation`. Preserve an explicitly requested `VisibleControls` policy, which also rejects navigation keys. Ordinary `type` is literal, never clipboard-based, and checks writability and actual focus in the working application or its owned dialog. For an observed opaque editor, use `-TargetMode Focused -FallbackReason <reason> -FallbackEvidence <reference>` after visibly focusing it. This explicit fallback cannot refocus, clear text, override reported read-only state, or embed Enter/Tab. It records the actual target and requires a separate expected-result assertion.
+
+`press-key -Key Tab|ShiftTab|Enter|Escape|Left|Right|Up|Down` sends bounded navigation under GuiNavigation with reason/evidence. Enter/Escape are single actions, followed by observation. Required menu/button routes still apply. `hotkey` and Shortcut clearing remain blocked unless AllowShortcuts is explicitly authorized. Clipboard is unsupported. A failed selector never authorizes object models, direct expected-output creation, or bypassing the GUI.
+
+For controls that update their value only on commit, type once, commit through an observed visible control or permitted Enter, then read/assert. Immediate `type -Verify` does not commit or retype.
+
+### Relative clicks and drag-and-drop
+
+```powershell
+.\potato.ps1 click -Name 'Observed canvas' -RelativeX 0.25 -RelativeY 0.5
+.\potato.ps1 drag -SourceSelectorJson '{"Name":"Observed source"}' -TargetSelectorJson '{"Name":"Observed destination"}' -DurationMs 350
+# Coordinate endpoints remain available for screenshot-grounded fallbacks:
+.\potato.ps1 drag -StartX 100 -StartY 100 -EndX 200 -EndY 200
+```
+
+Relative coordinates are fractions inside current element bounds. Drag endpoints also accept SourceRelativeX/Y and TargetRelativeX/Y (center by default), and nested selector paths. Both endpoints are resolved before pressing the mouse. Movement is smooth by default; the left button is released in a finally block even on failure. `dragged`/`released` report input delivery; assert the application's actual drop result separately.
+
+The stream stops at the first failed command by default. Use `-ContinueOnError` only with an interactive caller that reads and reconciles each response before sending more actions.
+
+For PDF layouts unsupported by the dependency-free reader, configure `POTATO_PDF_PYTHON` or pass `read-pdf -Reader Auto -PythonPath <python.exe>`. That installed Python must contain pypdf. The shipped helper only reads the file, avoids inline-code quoting, and records the chosen reader in the result. No dependency is downloaded automatically.
 
 `select`/`observe` preserve identity and patterns when an element has empty/invalid bounds, returning `boundingRectangle:null`, `boundsStatus`, and `propertyErrors`. Physical input and element screenshots require valid geometry; UIA reads/Invoke do not. `-ProcessId` scopes selectors and `-ModalOnly` limits matches to modal descendants. `start` only accepts executable launches; `-RequireNewProcess` rejects instances still running after its bounded wait.
 
