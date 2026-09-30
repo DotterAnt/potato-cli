@@ -80,6 +80,34 @@ function Assert-PotatoTextTarget {
     }
 }
 
+function Test-PotatoTypedPath {
+    param([string]$Text, [string]$Kind)
+    try {
+        if ($Kind -notin @('SaveFile','OpenFile','Directory')) { throw 'PathKind must be SaveFile, OpenFile, or Directory.' }
+        # File dialogs interpret relative paths against their own location, not the shell's.
+        # Check the literal string; never expand environment variables, trim, or rewrite input.
+        if ($Text -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/? .][^\\/?]*\\[^\\/?]+(?:\\|$))') {
+            throw 'Provide an absolute drive or UNC filename, not a relative or drive-relative path.'
+        }
+        if ($Text -match '[<>"|?*\x00-\x1f]') { throw 'The filename contains invalid path characters or surrounding quotes.' }
+        $fullPath=[IO.Path]::GetFullPath($Text)
+        if ($Kind -eq 'Directory') {
+            if (-not [IO.Directory]::Exists($fullPath)) { throw "Directory does not exist: $Text" }
+        } else {
+            if (-not [IO.Path]::GetFileName($fullPath) -or [IO.Directory]::Exists($fullPath)) { throw 'Provide a file path, not a directory.' }
+            $parent=[IO.Path]::GetDirectoryName($fullPath)
+            if (-not [IO.Directory]::Exists($parent)) { throw "Destination directory does not exist: $parent. Use a prepared output folder or create the required folder before entering the filename." }
+            if ($Kind -eq 'OpenFile' -and -not [IO.File]::Exists($fullPath)) { throw "File to open does not exist: $Text" }
+        }
+        return [ordered]@{kind=$Kind;path=$Text;parentPath=[IO.Path]::GetDirectoryName($fullPath);validated=$true}
+    } catch {
+        $failure=New-Object System.ArgumentException("Path validation failed before typing: $($_.Exception.Message) No input was sent; no file or directory was created.")
+        $failure.Data['PotatoErrorType']='PathValidationFailed'
+        $failure.Data['NoInputSent']=$true
+        throw $failure
+    }
+}
+
 # Same-process fields and UIA descendants/Win32-owned dialogs of the actual working
 # window are accepted. Matching executable names alone never establishes ownership.
 function Test-PotatoInputOwnership {

@@ -144,8 +144,14 @@ $form.Show(); $form.Hide()
     $wrong=Invoke-PotatoCliCommand type ($guard+@('-Text','must not send','-ExpectedFocusJson','{"Name":"Absent"}','-FocusTimeoutMs','0')) -CliRoot $root -AsObject
     $before=Invoke-Fixture read @('-Scope','FocusedWindow','-Name','Fixture filename')
     if ($wrong.ok -or $before.data.text -ne 'default.ext' -or $before.data.textSource -notin @('ValuePattern','TextPattern')) { throw 'Wrong focus guard sent input or readback lost its text source.' }
-    $replacement=Invoke-Fixture type ($guard+@('-Text','replacement.ext','-ExpectedFocusJson','{"Name":"Fixture filename"}','-Verify'))
-    if (-not $replacement.data.verified) { throw 'Guarded focused typing did not preserve and replace the default selection.' }
+    $invalid=Invoke-PotatoCliCommand type ($guard+@('-Text',(Join-Path $root 'missing\output.ext'),'-PathKind','SaveFile')) -CliRoot $root -AsObject
+    $unchanged=Invoke-Fixture read @('-Scope','FocusedWindow','-Name','Fixture filename')
+    if ($invalid.ok -or $invalid.outcome -ne 'not-dispatched' -or $invalid.error.type -ne 'PathValidationFailed' -or $unchanged.data.text -ne 'default.ext') { throw 'Missing-parent path validation changed the filename field.' }
+    $pathFolder=Join-Path $root ('literal [folder] '+[char]0x151+[char]0x4e2d)
+    [void][IO.Directory]::CreateDirectory($pathFolder)
+    $filenamePath=Join-Path $pathFolder ('literal +^%{} '+('x'*90)+'.ext')
+    $replacement=Invoke-Fixture type ($guard+@('-Text',$filenamePath,'-PathKind','SaveFile','-ExpectedFocusJson','{"Name":"Fixture filename"}','-Verify'))
+    if (-not $replacement.data.verified -or $replacement.data.pathValidation.path -cne $filenamePath -or (Test-Path -LiteralPath $filenamePath)) { throw 'Guarded filename typing changed the literal path, lost selection, or created output.' }
     $scoped=Invoke-Fixture select @('-Scope','FocusedWindow','-Name','Fixture cancel','-TimeoutMs','0')
     if ($scoped.data.count -ne 1) { throw 'FocusedWindow select did not find the dialog control.' }
     $modal=Invoke-Fixture select @('-Name','Fixture cancel','-ControlType','Button','-ProcessId',"$($child.Id)",'-ModalOnly','-TimeoutMs','2000')

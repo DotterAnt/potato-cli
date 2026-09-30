@@ -2150,6 +2150,12 @@ function Invoke-PotatoCliCommandCore {
     $previousDpi=[IntPtr]::Zero
     try {
         $policy = Get-PotatoInteractionPolicy -ArgsMap $argsMap -Command $normalized
+        $pathValidation=$null
+        if ($normalized -eq 'type' -and $argsMap.Contains('PathKind')) {
+            $pathText=Get-PotatoArg $argsMap @('Text')
+            if ($null -eq $pathText -and $argsMap._.Count) { $pathText=$argsMap._[0] }
+            $pathValidation=Test-PotatoTypedPath -Text ([string]$pathText) -Kind ([string]$argsMap.PathKind)
+        }
         if ($normalized -notin @('state','wait-file')) {
             Initialize-PotatoWindowIdentity
             $previousDpi=[PotatoWindowIdentity]::EnterPhysicalCoordinates()
@@ -2165,7 +2171,7 @@ function Invoke-PotatoCliCommandCore {
             'select' { $result = Invoke-PotatoSelect -ArgsMap $argsMap }
             'click' { $result = Invoke-PotatoClick -ArgsMap $argsMap }
             'click-coordinate' { $result = Invoke-PotatoClickCoordinate -ArgsMap $argsMap }
-            'type' { $result = Invoke-PotatoType -ArgsMap $argsMap }
+            'type' { $result = Invoke-PotatoType -ArgsMap $argsMap; if ($pathValidation) { $result.pathValidation=$pathValidation } }
             'hotkey' { $result = Invoke-PotatoHotkey -ArgsMap $argsMap }
             'press-key' { $result = Invoke-PotatoPressKey -ArgsMap $argsMap }
             'drag' { $result = Invoke-PotatoDrag -ArgsMap $argsMap }
