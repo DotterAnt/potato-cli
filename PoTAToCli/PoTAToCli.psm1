@@ -1,4 +1,5 @@
 ﻿. (Join-Path $PSScriptRoot 'Interaction.ps1')
+. (Join-Path $PSScriptRoot 'Pdf.ps1')
 $script:CliRoot = $null
 $script:StateRoot = $null
 $script:StatePath = $null
@@ -1885,6 +1886,17 @@ function Invoke-PotatoCliCommandCore {
         return
     }
 
+    if ($normalized -eq 'read-pdf') {
+        try {
+            $path = Get-PotatoArg -ArgsMap $argsMap -Names @('Path')
+            if (-not $path) { throw 'read-pdf requires -Path.' }
+            $text = Read-PotatoPdfText -Path $path
+            $result = @{ path = (Get-Item -LiteralPath $path).FullName; text = $text }
+        }
+        catch { $ok = $false; $errorObject = @{ message = $_.Exception.Message; type = 'PdfReadError' } }
+        return @{ ok = $ok; command = $normalized; data = $result; error = $errorObject; session = $null; logPath = $null; durationMs = $watch.ElapsedMilliseconds }
+    }
+
     $script:CurrentState = $null
     $script:StatePath = $null
     $script:RunsRoot = $null
@@ -1973,7 +1985,7 @@ function Invoke-PotatoCliCommand {
     $lease = $null
     $watch = [Diagnostics.Stopwatch]::StartNew()
     try {
-        if ($Command -ne 'help') {
+        if ($Command -notin @('help', 'read-pdf')) {
             $map = ConvertTo-PotatoArgumentMap $Arguments
             $lease = Enter-PotatoDesktopLease -TimeoutMs (ConvertTo-PotatoInt (Get-PotatoArg $map @('LeaseTimeoutMs')) 15000)
         }
@@ -1991,4 +2003,4 @@ function Invoke-PotatoCliCommand {
     $response | ConvertTo-Json -Depth 60 -Compress
 }
 
-Export-ModuleMember -Function Invoke-PotatoCliCommand
+Export-ModuleMember -Function Invoke-PotatoCliCommand, Read-PotatoPdfText

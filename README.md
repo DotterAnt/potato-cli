@@ -81,6 +81,7 @@ Run `potato.ps1 help` for JSON command guidance, or `potato.ps1 help -Topic type
 | `wait-element` | Wait for an element selector to appear. |
 | `wait-file` | Wait for a file to appear or disappear. |
 | `read` | Read text/name/value from an element. |
+| `read-pdf` | Read text from a local PDF without external dependencies. |
 | `screenshot` | Save a full-screen, region, or element screenshot. |
 | `close-window` | Close matching top-level windows, or the current working window. |
 | `report` | Append a local JSONL report event, optionally with a screenshot. |
@@ -154,6 +155,29 @@ Wait for a saved file:
 ```powershell
 .\potato.ps1 wait-file -Path "C:\Temp\PoTAToSmoke.docx" -TimeoutMs 15000
 ```
+
+## Reading PDF text
+
+```powershell
+.\potato.ps1 read-pdf -Path 'C:\Temp\ExcelTest.pdf'
+# The command's JSON response contains data.path and data.text.
+
+Import-Module .\PoTAToCli\PoTAToCli.psm1
+Read-PotatoPdfText -Path 'C:\Temp\ExcelTest.pdf' # Returns a plain string.
+```
+
+This small reader uses only PowerShell and built-in .NET. It handles simple text
+PDFs such as Microsoft Print to PDF and Edge output: ordinary PDF objects, direct
+stream lengths, plain/FlateDecode streams, and fonts with one/two-byte ToUnicode
+maps. Text follows drawing order; whitespace is approximate and tables/layout are
+not reconstructed. It does not support scanned PDFs/OCR, encryption, object/xref
+streams, incremental updates, or Form XObjects. Unsupported input or a PDF with
+no extractable text fails clearly. `read-pdf` needs no desktop, takes no desktop
+lock, and does not read or change CLI session state. PDF contents are returned as
+data and never executed.
+
+Run `tests\Pdf.Tests.ps1` for dependency-free regression checks; optionally pass
+`-SampleDirectory 'C:\Users\you\Downloads'` to check the six supplied sample names.
 
 ## Agent Guidance
 

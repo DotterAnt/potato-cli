@@ -91,6 +91,10 @@
       "usage": "read <selector options>",
       "notes": "Returns data.text from ValuePattern, TextPattern, or element name. Choose a meaningful expected-result assertion for the target."
     },
+    "read-pdf": {
+      "usage": "read-pdf -Path 'document.pdf'",
+      "notes": "Returns data.path and data.text using built-in .NET only. Supports simple text PDFs such as Microsoft Print to PDF and Edge output, with ordinary objects, direct stream lengths, plain/FlateDecode streams and one/two-byte ToUnicode maps. Whitespace is approximate; text follows drawing order. No OCR, encryption, object/xref streams, incremental updates or Form XObjects. Unsupported input or no extractable text returns ok:false. Needs no desktop, takes no desktop lock and does not change session state."
+    },
     "screenshot": {
       "usage": "screenshot [-OutFile 'evidence.png'] [<selector options>] [-X 0 -Y 0 -Width 800 -Height 600]",
       "notes": "Evidence capture alone is not an assertion that the image is correct."
