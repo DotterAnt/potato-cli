@@ -3,9 +3,10 @@
 function Get-PotatoNativeInputState {
     Initialize-PotatoWindowIdentity
     $native=[PotatoWindowIdentity]::ReadFocus()
-    $working=$script:CurrentState.working
-    $owned=$working -and ($native.foregroundProcessId -eq $working.processId -or
+    $working=if ($script:InputScope) {$script:InputScope} else {$script:CurrentState.working}
+    $owned=$working -and ((-not $working.windowScoped -and $native.foregroundProcessId -eq $working.processId) -or
         [PotatoWindowIdentity]::IsOwnedBy([IntPtr]$native.foregroundHandle,[IntPtr]$working.nativeWindowHandle))
+    if ($script:InputScope) { $owned=$owned -and $native.foregroundHandle -eq $script:InputScope.nativeWindowHandle }
     [ordered]@{ready=[bool]($owned -and $native.stable -and $native.enabled -and $native.withinForeground);
         owned=[bool]$owned;stable=$native.stable;enabled=$native.enabled;withinForeground=$native.withinForeground;
         foregroundHandle=$native.foregroundHandle;focusHandle=$native.focusHandle;

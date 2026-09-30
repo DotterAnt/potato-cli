@@ -2,6 +2,7 @@
 . (Join-Path $PSScriptRoot 'Pdf.ps1')
 . (Join-Path $PSScriptRoot 'Discovery.ps1')
 . (Join-Path $PSScriptRoot 'Focus.ps1')
+. (Join-Path $PSScriptRoot 'Lifecycle.ps1')
 $script:CliRoot = $null
 $script:StateRoot = $null
 $script:StatePath = $null
@@ -456,6 +457,10 @@ function Get-PotatoWorkingElement {
         catch {}
     }
 
+    if ($state.working.windowScoped) {
+        if ($Required) { throw 'The selected window closed. Use windows and focus explicitly; another window in the same host is not a replacement.' }
+        return $null
+    }
     $selector = [ordered]@{
         ProcessId = $state.working.processId
         ControlType = 'Window'
@@ -909,6 +914,7 @@ function Invoke-PotatoStart {
     if (-not $processName) { throw 'start requires -ProcessName, -FilePath, or a positional process name.' }
 
     $arguments = Get-PotatoArg -ArgsMap $ArgsMap -Names @('Arguments', 'ArgumentList') -Default ''
+    if ($arguments -is [bool]) { throw 'Arguments requires a literal value. For a value beginning with a dash use -Arguments=<value> as one argument token.' }
     $killExisting = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('KillExisting')) $false
     $timeoutMs = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('WaitForWindowMs', 'TimeoutMs')) 15000
     $maximize = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Maximize', 'MaximizeWindow')) $false
@@ -921,6 +927,11 @@ function Invoke-PotatoStart {
     }
 
     $requireNew = ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('RequireNewProcess')) $false
+    $requireWindow = ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('RequireNewWindow')) $false
+    if ($requireWindow -and ($requireNew -or $killExisting)) { throw 'RequireNewWindow cannot be combined with RequireNewProcess or KillExisting.' }
+    if ($requireWindow) {
+        return Invoke-PotatoStartWindow $ArgsMap $(if ($filePath) {$filePath} else {$processName}) $arguments $targetProcessName $timeoutMs $maximize
+    }
     $priorExitWaitMs = ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('WaitForPreviousExitMs')) 3000
     if ($priorExitWaitMs -lt 0 -or $priorExitWaitMs -gt 60000) { throw 'WaitForPreviousExitMs must be between 0 and 60000.' }
     $existingIds = @(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
@@ -991,20 +1002,36 @@ function Invoke-PotatoFocus {
 
     $selector = New-PotatoSelectorFromArguments -ArgsMap $ArgsMap
     $selector.Recurse = $false
-    $selector.FindFirst = $true
+    $selector.FindFirst = $false
     $timeoutMs = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('TimeoutMs', 'MillisecondsToWait')) 5000
     $maximize = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Maximize', 'MaximizeWindow')) $false
 
     if ($selector.WindowTitle -and -not $selector.Name) { $selector.Name = $selector.WindowTitle }
     $processId = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('ProcessId')) 0
-    $windows = @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs)
+    $ticketJson=Get-PotatoArg $ArgsMap @('WindowIdentityJson')
+    $checkpointId=Get-PotatoArg $ArgsMap @('SinceCheckpoint')
+    if ($ticketJson -and $checkpointId) { throw 'Use WindowIdentityJson or SinceCheckpoint, not both.' }
+    $checkpoint=if ($checkpointId) { Get-PotatoWindowCheckpoint $checkpointId }
+    if ($checkpoint) {
+        $watch=[Diagnostics.Stopwatch]::StartNew()
+        do {
+            $windows=@(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs 0 | Where-Object {$checkpoint.handles -notcontains [long]$_.Current.NativeWindowHandle})
+            if ($windows.Count -or $watch.ElapsedMilliseconds -ge $timeoutMs) {break}
+            Start-Sleep -Milliseconds 100
+        } while ($true)
+    } else {
+        $windows = if ($ticketJson) { @(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) } else { @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
+    }
     if ($processId -gt 0) { $windows = @($windows | Where-Object { $_.Current.ProcessId -eq $processId }) }
     $window = $windows | Select-Object -First 1
     if (-not $window) { throw 'No matching top-level window was found.' }
+    if ($windows.Count -gt 1) { throw 'More than one top-level window matches. Narrow the observed selector or use WindowIdentityJson.' }
 
     $working = Set-PotatoWorkingWindow -Element $window
+    $working['windowScoped']=$true
+    Save-PotatoState $script:CurrentState
     [void](Show-PotatoWindow -Handle $working.nativeWindowHandle -Maximize:$maximize)
-    [ordered]@{ working = $working }
+    [ordered]@{ working = $working; ownedWindow=$(if ($checkpoint) {New-PotatoOwnedWindow $working} else {$null}) }
 }
 
 function Invoke-PotatoWindows {
@@ -1017,10 +1044,21 @@ function Invoke-PotatoWindows {
     $selector = New-PotatoSelectorFromArguments -ArgsMap $ArgsMap
     $selector.Recurse = $false
     $timeoutMs = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('TimeoutMs')) 0
-    $windows = @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs)
+    $ticketJson=Get-PotatoArg $ArgsMap @('WindowIdentityJson')
+    $checkpoint=if (ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Checkpoint')) $false) {New-PotatoWindowCheckpoint}
+    $windows = if ($ticketJson) { @(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) } else { @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
+    if (ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Foreground')) $false) {
+        Initialize-PotatoWindowIdentity
+        $handle=[PotatoWindowIdentity]::ForegroundRoot()
+        $windows=@(if ($handle -ne [IntPtr]::Zero) {[Windows.Automation.AutomationElement]::FromHandle($handle)})
+    }
     [ordered]@{
         count = $windows.Count
         windows = @($windows | ForEach-Object { ConvertTo-PotatoElementInfo -Element $_ })
+        checkpointId = $(if ($checkpoint) {$checkpoint.id} else {$null})
+        foregroundSelector = $(if ((Get-PotatoArg $ArgsMap @('Foreground')) -and $windows.Count -eq 1) {
+            @{Name=$windows[0].Current.Name;ClassName=$windows[0].Current.ClassName;ProcessId=$windows[0].Current.ProcessId}
+        })
     }
 }
 
@@ -1502,7 +1540,11 @@ function Get-PotatoEditableText {
     if ($Element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {
         return [string]$pattern.DocumentRange.GetText(-1)
     }
-    throw 'Text verification requires ValuePattern or TextPattern on the target; its name is not text evidence.'
+    Initialize-PotatoWindowIdentity
+    if ([PotatoWindowIdentity]::IsStandardEdit([IntPtr]$Element.Current.NativeWindowHandle,$Element.Current.ProcessId,$false)) {
+        return [PotatoWindowIdentity]::ReadEdit([IntPtr]$Element.Current.NativeWindowHandle,$Element.Current.ProcessId)
+    }
+    throw 'Text verification requires ValuePattern, TextPattern or a standard Windows Edit control; its name is not text evidence.'
 }
 
 function Test-PotatoTypedTextMatch {
@@ -1556,7 +1598,7 @@ function Invoke-PotatoType {
 
     $focus = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Focus')) $false
     $preDelete = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('PreDelete')) $false
-    $verify = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Verify')) $false
+    $verify = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Verify')) ([bool](Get-PotatoArg $ArgsMap @('PathKind')))
     $typeByCharacter = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('TypeByCharacter')) $false
     $inputDelayMs=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('InputDelayMs')) $(if ($typeByCharacter) {50} else {5})
     if ($inputDelayMs -lt 0 -or $inputDelayMs -gt 100 -or ($typeByCharacter -and $ArgsMap.ContainsKey('InputDelayMs'))) { throw 'InputDelayMs must be 0..100; do not combine it with the legacy TypeByCharacter flag.' }
@@ -1575,8 +1617,8 @@ function Invoke-PotatoType {
     $expectedFocus=Get-PotatoArg $ArgsMap @('ExpectedFocusJson')
     if ($expectedFocus -and -not $opaque) { throw 'ExpectedFocusJson is for TargetMode Focused. Writable typing already resolves and focuses its selector.' }
     $hasTargetSelector = @('SelectorJson','PathJson','AutomationId','Name','ControlType','ClassName','Class','WindowTitle') | Where-Object { $ArgsMap.ContainsKey($_) }
-    if ($opaque -and ($hasTargetSelector -or $focus -or $preDelete -or $requestedFocusMethod -ne 'Auto')) { throw 'TargetMode Focused preserves existing focus: no selector, Focus, FocusMethod override, or PreDelete. Visibly focus the editor first.' }
-    try { [void](Get-PotatoWorkingElement -Required) }
+    if ($opaque -and ($hasTargetSelector -or $focus -or $requestedFocusMethod -ne 'Auto')) { throw 'TargetMode Focused preserves existing focus: no selector, Focus, or FocusMethod override. PreDelete requires supported text selection.' }
+    try { if (-not $script:InputScope) { [void](Get-PotatoWorkingElement -Required) } }
     catch {
         if ($opaque) { throw (New-PotatoFocusFailure $_.Exception.Message (Get-PotatoNativeInputState)) }
         throw
@@ -1608,7 +1650,7 @@ function Invoke-PotatoType {
         }
         if ($requestedFocusMethod -eq 'Mouse' -or ($requestedFocusMethod -eq 'Auto' -and -not $element.Current.HasKeyboardFocus)) {
             if ($element.Current.IsOffscreen) { throw 'Mouse focus requires a visible text control.' }
-            $working = Get-PotatoWorkingElement
+            $working = if (-not $script:InputScope) {Get-PotatoWorkingElement}
             if ($working) { [void](Show-PotatoWindow -Handle $working.Current.NativeWindowHandle) }
             $point = Get-PotatoClickPoint -Element $element
             Move-PotatoMouse -X $point.x -Y $point.y
@@ -1619,7 +1661,7 @@ function Invoke-PotatoType {
     elseif ($requestedFocusMethod -ne 'Auto') { throw 'FocusMethod UIA or Mouse requires an explicit text target selector.' }
     $expectedProcessId = ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('ProcessId')) 0
     if ($expectedProcessId -and $element.Current.ProcessId -ne $expectedProcessId) { throw 'Focused element does not match the requested ProcessId.' }
-    Assert-PotatoTextTarget -Element $element -Text ([string]$text) -AllowOpaque:$opaque -RequireFocus:(-not $opaque)
+    Assert-PotatoTextTarget -Element $element -Text ([string]$text) -AllowOpaque:$opaque -RequireFocus:$false
     if ($opaque) { Assert-PotatoInputFocusUnchanged $inputFocus } else { Assert-PotatoForegroundInput $element }
     $targetInfo = ConvertTo-PotatoElementInfo $element
     $clearMethod = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('ClearMethod') -Default 'Selection')
@@ -1631,10 +1673,13 @@ function Invoke-PotatoType {
         }
         else {
             $selection = $null
-            if (-not $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$selection)) {
+            if ($element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$selection)) {
+                $selection.DocumentRange.Select()
+            } elseif ([PotatoWindowIdentity]::IsStandardEdit([IntPtr]$element.Current.NativeWindowHandle,$element.Current.ProcessId,$true)) {
+                [PotatoWindowIdentity]::SelectEditText([IntPtr]$element.Current.NativeWindowHandle,$element.Current.ProcessId)
+            } else {
                 throw 'PreDelete requires TextPattern selection. Use the visible selection route, or explicit -ClearMethod Shortcut only if permitted by the testcase.'
             }
-            $selection.DocumentRange.Select()
         }
         [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
     }
@@ -1874,6 +1919,11 @@ function Get-PotatoElementText {
         }
     }
     catch {}
+    Initialize-PotatoWindowIdentity
+    if ([PotatoWindowIdentity]::IsStandardEdit([IntPtr]$Element.Current.NativeWindowHandle,$Element.Current.ProcessId,$false)) {
+        $value=[PotatoWindowIdentity]::ReadEdit([IntPtr]$Element.Current.NativeWindowHandle,$Element.Current.ProcessId)
+        if ($WithSource) {return @{text=$value;source='Win32Edit'}}; return $value
+    }
     if ($WithSource) { return @{text=$Element.Current.Name;source='Name'} }; return $Element.Current.Name
 }
 
@@ -1991,7 +2041,9 @@ function Invoke-PotatoCloseWindow {
     $timeoutMs = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('TimeoutMs')) 0
     $hasSelector = $selector.Name -or $selector.AutomationId -or $selector.ClassName -or $selector.ControlType -or $selector.ProcessName -or $selector.ProcessId -or $selector.WindowTitle
     $windows = @()
-    if ($hasSelector) { $windows = @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
+    $ticketJson=Get-PotatoArg $ArgsMap @('WindowIdentityJson')
+    if ($ticketJson) { $windows=@(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) }
+    elseif ($hasSelector) { $windows = @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
     else {
         $working = Get-PotatoWorkingElement
         if ($working) { $windows = @($working) }
@@ -2193,6 +2245,7 @@ function Invoke-PotatoCliCommandCore {
     $script:StatePath = $null
     $script:RunsRoot = $null
     $policy = $null
+    $script:InputScope=$null
     $dispatched = $false
     $previousDpi=[IntPtr]::Zero
     try {
@@ -2208,6 +2261,10 @@ function Invoke-PotatoCliCommandCore {
             $previousDpi=[PotatoWindowIdentity]::EnterPhysicalCoordinates()
         }
         Initialize-PotatoEnvironment -CliRoot $CliRoot
+        if ($normalized -in @('type','press-key') -and (Get-PotatoArg $argsMap @('Scope')) -eq 'ForegroundWindow') {
+            $scopeRoot=Get-PotatoGuardedForegroundWindow (Get-PotatoArg $argsMap @('WindowSelectorJson'))
+            $script:InputScope=@{processId=$scopeRoot.Current.ProcessId;nativeWindowHandle=$scopeRoot.Current.NativeWindowHandle;windowScoped=$true}
+        }
         Write-PotatoLog -Command $normalized -Message "Command started."
         $dispatched = $true
         switch ($normalized) {
@@ -2261,6 +2318,7 @@ function Invoke-PotatoCliCommandCore {
         if ($script:CurrentState) { try { Write-PotatoLog -Command $normalized -Level Error -Message $errorObject.message } catch {} }
     }
     finally {
+        $script:InputScope=$null
         if ($previousDpi -ne [IntPtr]::Zero) { [void][PotatoWindowIdentity]::SetThreadDpiAwarenessContext($previousDpi) }
         $watch.Stop()
     }

@@ -17,7 +17,6 @@ function Get-PotatoGuardedForegroundWindow {
         ($keys -contains 'ProcessId' -and ($selector.ProcessId -notmatch '^\d+$' -or [int]$selector.ProcessId -lt 1))) {
         throw 'ForegroundWindow requires WindowSelectorJson with an exact observed Name and ClassName, and optional ProcessId only.'
     }
-    [void](Get-PotatoWorkingElement -Required)
     Initialize-PotatoWindowIdentity
     $handle=[PotatoWindowIdentity]::ForegroundRoot()
     if ($handle -eq [IntPtr]::Zero) { throw (New-PotatoScopeFailure 'No foreground window matches the guarded scope.') }

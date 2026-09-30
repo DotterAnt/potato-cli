@@ -254,8 +254,18 @@ $form.Show(); $form.Hide()
     $scopeArgs=@('-Scope','ForegroundWindow','-WindowSelectorJson',$windowJson,'-FallbackReason','Observed system-hosted dialog fixture','-FallbackEvidence','fixture-window-observation')
     $brokerView=Invoke-Fixture observe ($scopeArgs+@('-Format','Compact','-Depth','3','-MaxElements','60'))
     if ($brokerView.data.root.name -ne $brokerTitle) {throw 'Explicit broker scope inspected the wrong window.'}
+    $foreground=Invoke-Fixture windows @('-Foreground')
+    if ($foreground.data.foregroundSelector.Name -ne $brokerTitle) {throw 'Foreground discovery missed the external window identity.'}
+    $brokerText='Guarded path-like literal C:\folder with spaces\image.png'
+    $brokerTyped=Invoke-Fixture type ($scopeArgs+@('-Name','Fixture input','-Text',$brokerText,'-Verify'))
+    if (-not $brokerTyped.data.verified) {throw 'Guarded writable typing did not verify.'}
+    Invoke-Fixture press-key ($scopeArgs+@('-Key','Tab','-ExpectedFocusJson','{"Name":"Fixture input"}')) | Out-Null
+    Invoke-Fixture press-key ($scopeArgs+@('-Key','ShiftTab','-ExpectedFocusJson','{"Name":"Fixture save"}')) | Out-Null
+    $brokerTyped=Invoke-Fixture type ($scopeArgs+@('-TargetMode','Focused','-ExpectedFocusJson','{"Name":"Fixture input"}','-PreDelete','-Text',$brokerText,'-Verify'))
+    if (-not $brokerTyped.data.verified) {throw 'Guarded focused selection replacement did not verify.'}
     Invoke-Fixture click ($scopeArgs+@('-Name','Fixture save')) | Out-Null
     if (-not (Test-Path ($output+'.broker'))) {throw 'Guarded broker selector did not invoke the visible control.'}
+    if ([IO.File]::ReadAllText($output+'.broker') -cne $brokerText) {throw 'Guarded input did not reach the broker field.'}
     $state=Invoke-Fixture state @()
     if ($state.data.state.working.processId -ne $child.Id) {throw 'Guarded scope changed the working process for cleanup.'}
     $wrongScope=$scopeArgs.Clone(); $wrongScope[3]='{"Name":"wrong window","ClassName":"wrong class"}'

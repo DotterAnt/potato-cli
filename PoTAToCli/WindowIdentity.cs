@@ -1,7 +1,56 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
+using System.Text;
 
 public static class PotatoWindowIdentity {
+    delegate bool EnumWindowProc(IntPtr window, IntPtr param);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowProc callback, IntPtr param);
+    public static long[] WindowHandles() {
+        var handles=new List<long>();
+        if (!EnumWindows((window,param)=>{handles.Add(window.ToInt64());return true;},IntPtr.Zero))
+            throw new InvalidOperationException("Cannot snapshot desktop windows.");
+        return handles.ToArray();
+    }
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool SetPropW(IntPtr window,string name,IntPtr value);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern IntPtr GetPropW(IntPtr window,string name);
+    public static void TagWindow(IntPtr window,string token) {
+        if (!SetPropW(window,"PoTATo.Window."+token,new IntPtr(1)))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(),"Cannot mark the new GUI window for scoped cleanup.");
+    }
+    public static bool HasWindowTag(IntPtr window,string token) {
+        // Windows discards properties on destruction, including when the numeric
+        // HWND is reused later by the same process and class.
+        return !String.IsNullOrEmpty(token) && GetPropW(window,"PoTATo.Window."+token)==new IntPtr(1);
+    }
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr window, StringBuilder text, int length);
+    [DllImport("user32.dll")] static extern int GetWindowLongW(IntPtr window, int index);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr window,uint message,IntPtr wParam,StringBuilder text,uint flags,uint timeout,out IntPtr result);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr window,uint message,IntPtr wParam,IntPtr lParam,uint flags,uint timeout,out IntPtr result);
+    public static bool IsStandardEdit(IntPtr window, int processId, bool writable) {
+        if (window==IntPtr.Zero || ProcessId(window)!=processId) return false;
+        var name=new StringBuilder(256); GetClassNameW(window,name,name.Capacity);
+        // Read actual field text, never a generic window caption. Exclude passwords.
+        return String.Equals(name.ToString(),"Edit",StringComparison.OrdinalIgnoreCase) &&
+            (GetWindowLongW(window,-16) & (0x20 | (writable ? 0x800 : 0)))==0;
+    }
+    public static string ReadEdit(IntPtr window,int processId) {
+        if (!IsStandardEdit(window,processId,false)) throw new InvalidOperationException("Not a readable standard Edit control.");
+        IntPtr length;
+        if (SendMessageTimeoutW(window,0x000E,IntPtr.Zero,IntPtr.Zero,2,1000,out length)==IntPtr.Zero)
+            throw new InvalidOperationException("Edit readback timed out.");
+        if (length.ToInt64()<0 || length.ToInt64()>1048576) throw new InvalidOperationException("Edit text exceeds the readback limit.");
+        var text=new StringBuilder((int)length+1); IntPtr read;
+        if (SendMessageTimeoutW(window,0x000D,new IntPtr(text.Capacity),text,2,1000,out read)==IntPtr.Zero)
+            throw new InvalidOperationException("Edit readback timed out.");
+        return text.ToString();
+    }
+    public static void SelectEditText(IntPtr window,int processId) {
+        if (!IsStandardEdit(window,processId,true)) throw new InvalidOperationException("Not a writable standard Edit control.");
+        IntPtr result;
+        if (SendMessageTimeoutW(window,0x00B1,IntPtr.Zero,new IntPtr(-1),2,1000,out result)==IntPtr.Zero)
+            throw new InvalidOperationException("Edit selection timed out.");
+    }
     [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")] public static extern IntPtr GetThreadDpiAwarenessContext();
     [DllImport("user32.dll")] public static extern bool AreDpiAwarenessContextsEqual(IntPtr first, IntPtr second);

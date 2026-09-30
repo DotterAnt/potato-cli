@@ -9,7 +9,8 @@ function Get-PotatoInteractionPolicy {
     $reason = [string](Get-PotatoArg $ArgsMap @('FallbackReason') '')
     $evidence = [string](Get-PotatoArg $ArgsMap @('FallbackEvidence') '')
     if ((Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') {
-        if ($Command -notin @('observe','select','read','wait-element','click')) { throw 'Guarded ForegroundWindow supports observation and selector clicks only; it never grants unscoped input or process ownership.' }
+        if ($Command -notin @('observe','select','read','wait-element','click','type','press-key')) { throw 'Guarded ForegroundWindow supports observation, selector clicks and guarded text/navigation; it never grants process ownership.' }
+        if ($Command -eq 'type' -and (Get-PotatoArg $ArgsMap @('TargetMode') 'Writable') -eq 'Focused' -and -not (Get-PotatoArg $ArgsMap @('ExpectedFocusJson'))) { throw 'Focused typing in ForegroundWindow requires ExpectedFocusJson for the observed input control.' }
         if ([string]::IsNullOrWhiteSpace($reason) -or [string]::IsNullOrWhiteSpace($evidence)) { throw 'ForegroundWindow requires FallbackReason and FallbackEvidence for the observed system-hosted GUI route.' }
         if ((ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Focus')) $false) -or
             (ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('ElementFocus')) $false)) { throw 'Guarded ForegroundWindow preserves focus; Focus/ElementFocus overrides are not allowed.' }
@@ -41,6 +42,14 @@ function Get-PotatoInteractionPolicy {
         $launch = [string](Get-PotatoArg $ArgsMap @('ProcessName','FilePath','Path'))
         if (-not $launch -and $ArgsMap._.Count) { $launch = [string]$ArgsMap._[0] }
         if ($launch -and ([IO.Path]::GetExtension($launch) -notin @('', '.exe'))) { throw 'start launches executables only. Open documents through the application GUI.' }
+        $launcher=[IO.Path]::GetFileNameWithoutExtension($launch)
+        $launchArgs=[string](Get-PotatoArg $ArgsMap @('Arguments','ArgumentList'))
+        if (($launcher -eq 'cmd' -and $launchArgs -match '(?i)/[ck]\b.*\bstart\b') -or
+            ($launcher -in @('powershell','pwsh') -and $launchArgs -match '(?i)\bStart-Process\b|-(?:enc|encodedcommand)\b') -or
+            ($launcher -eq 'rundll32' -and $launchArgs -match '(?i)FileProtocolHandler|ShellExec_RunDLL') -or
+            ($launcher -eq 'mshta' -and $launchArgs -match '(?i)javascript:|vbscript:|\.Run\s*\(')) {
+            throw 'Shell/protocol launch wrappers bypass the recorded GUI file-opening route. Start the file manager with RequireNewWindow, navigate its visible UI, then focus the observed viewer window. Do not keep a launcher alive to manufacture ownership.'
+        }
     }
     return [ordered]@{ mode=$mode; shortcutUsed=[bool]$shortcut; navigationUsed=($Command -eq 'press-key'); opaqueTyping=$opaque; fallbackReason=$reason; fallbackEvidence=$evidence }
 }
@@ -80,6 +89,11 @@ function Assert-PotatoTextTarget {
         if ($readOnly -is [bool] -and $readOnly) { throw 'Target explicitly reports read-only; focused fallback cannot override it.' }
         $writable = $readOnly -is [bool] -and -not $readOnly
     }
+    if (-not $writable -and $Element.Current.NativeWindowHandle) {
+        Initialize-PotatoWindowIdentity
+        $writable=[PotatoWindowIdentity]::IsStandardEdit([IntPtr]$Element.Current.NativeWindowHandle,$Element.Current.ProcessId,$true)
+        if (-not $writable -and [PotatoWindowIdentity]::IsStandardEdit([IntPtr]$Element.Current.NativeWindowHandle,$Element.Current.ProcessId,$false)) {throw 'Target explicitly reports read-only; focused fallback cannot override it.'}
+    }
     if (-not $writable -and -not $AllowOpaque) { throw 'Target is not a confirmed writable text control. For an observed opaque editor, use type -TargetMode Focused with FallbackReason/FallbackEvidence after visibly focusing it; assert the committed result separately.' }
     if ($Text -match '[\r\n\t]' -and ($role -ne 'Document' -or $AllowOpaque)) {
         throw 'Newline/tab typing is limited to Document controls. Use visible controls for dialog submission and navigation.'
@@ -118,9 +132,9 @@ function Test-PotatoTypedPath {
 # window are accepted. Matching executable names alone never establishes ownership.
 function Test-PotatoInputOwnership {
     param([object] $Element)
-    if (-not $Element -or -not $script:CurrentState.working) { return $false }
-    $working = $script:CurrentState.working
-    if ($Element.Current.ProcessId -eq $working.processId) { return $true }
+    $working = if ($script:InputScope) {$script:InputScope} else {$script:CurrentState.working}
+    if (-not $Element -or -not $working) { return $false }
+    if (-not $working.windowScoped -and $Element.Current.ProcessId -eq $working.processId) { return $true }
     $node = $Element
     for ($i=0; $i -lt 32 -and $node; $i++) {
         if ($working.nativeWindowHandle -and $node.Current.NativeWindowHandle -eq $working.nativeWindowHandle) { return $true }
@@ -143,7 +157,8 @@ function Initialize-PotatoWindowIdentity {
 
 function Assert-PotatoForegroundInput {
     param([object] $Element)
-    if (-not $Element -or -not $Element.Current.HasKeyboardFocus -or -not $Element.Current.IsEnabled -or -not (Test-PotatoInputOwnership $Element)) {
+    $native=Get-PotatoNativeInputState
+    if (-not $Element -or -not $Element.Current.IsEnabled -or -not (Test-PotatoNativeElementFocus $Element $native)) {
         throw 'Input requires enabled keyboard focus in the working application or its owned dialog. Observe and visibly focus the target before retrying.'
     }
     Initialize-PotatoWindowIdentity
@@ -162,11 +177,11 @@ function Invoke-PotatoPressKey {
     if ($count -lt 1 -or $count -gt 20 -or ($key -in @('Enter','Escape') -and $count -ne 1)) { throw 'Count must be 1..20; Enter and Escape must be sent once and followed by an observation.' }
     # Refresh a replaced splash/working window without activating it or stealing
     # focus from a menu or modal dialog.
-    [void](Get-PotatoWorkingElement -Required)
+    if (-not $script:InputScope) { [void](Get-PotatoWorkingElement -Required) }
     $before = $null
     for ($i=0; $i -lt $count; $i++) {
         try {
-            $inputFocus=Wait-PotatoInputFocus '' (ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('FocusTimeoutMs')) 2000)
+            $inputFocus=Wait-PotatoInputFocus (Get-PotatoArg $ArgsMap @('ExpectedFocusJson')) (ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('FocusTimeoutMs')) 2000)
             $focused=$inputFocus.element
             Assert-PotatoInputFocusUnchanged $inputFocus
         } catch {
