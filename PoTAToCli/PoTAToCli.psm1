@@ -529,7 +529,8 @@ function Find-PotatoElement {
         [switch] $FindFirst,
         [int] $MaxResults = 0,
         [switch] $RefreshWorkingParent,
-        [switch] $RefreshFocusedParent
+        [switch] $RefreshFocusedParent,
+        [switch] $IncludeRoot
     )
 
     if (-not $Parent) {
@@ -570,6 +571,10 @@ function Find-PotatoElement {
             }
             if ($RefreshFocusedParent -and $attempt -gt 0) { $Parent=Get-PotatoFocusedWindow }
             $attempt++
+            if ($IncludeRoot -and (Test-PotatoElementMatch -Element $Parent -Selector $Selector)) {
+                $matches=@($Parent)
+                if ($firstOnly -or $MaxResults -eq 1) { return ,$Parent }
+            }
             if ($firstOnly -and $exact) { $collection = @($Parent.FindFirst($scope, $condition)) | Where-Object { $null -ne $_ } }
             else { $collection = $Parent.FindAll($scope, $condition) }
             foreach ($element in $collection) {
@@ -1032,7 +1037,8 @@ function ConvertTo-PotatoTreeNode {
 
         [int] $Depth = 2,
 
-        [ref] $Remaining
+        [ref] $Remaining,
+        [ref] $DepthBoundaryReached
     )
 
     if ($Remaining.Value -le 0) { return $null }
@@ -1044,6 +1050,7 @@ function ConvertTo-PotatoTreeNode {
     }
 
     if ($Depth -le 0 -or $Remaining.Value -le 0) {
+        if ($Depth -le 0 -and $DepthBoundaryReached) { $DepthBoundaryReached.Value=$true }
         return $node
     }
 
@@ -1051,7 +1058,7 @@ function ConvertTo-PotatoTreeNode {
         $children = $Element.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
         foreach ($child in $children) {
             if ($Remaining.Value -le 0) { break }
-            $childNode = ConvertTo-PotatoTreeNode -Element $child -Depth ($Depth - 1) -Remaining $Remaining
+            $childNode = ConvertTo-PotatoTreeNode -Element $child -Depth ($Depth - 1) -Remaining $Remaining -DepthBoundaryReached $DepthBoundaryReached
             if ($childNode) { $node.children += $childNode }
         }
     }
@@ -1081,12 +1088,14 @@ function Invoke-PotatoObserve {
     }
     if ($format -eq 'Compact') {
         $remaining=[ref]$maxElements
-        $tree = if ($root) { ConvertTo-PotatoTreeNode $root -Depth $depth -Remaining $remaining }
+        $depthBoundary=[ref]$false
+        $tree = if ($root) { ConvertTo-PotatoTreeNode $root -Depth $depth -Remaining $remaining -DepthBoundaryReached $depthBoundary }
         return [ordered]@{scope=(Get-PotatoArg $ArgsMap @('Scope') 'Working');
             root=$(if ($root) { ConvertTo-PotatoElementInfo $root });
             focusedElement=(ConvertTo-PotatoCompactElement (Get-PotatoForegroundWindowInfo));
             elements=@(Get-PotatoCompactElements $tree); limitReached=($remaining.Value -le 0);
-            hint='Selectors are candidates within this scope; check uniqueness. Use click Auto. Add constraints only to disambiguate observed matches.'}
+            depthBoundaryReached=$depthBoundary.Value;
+            hint='Selectors are candidates, not proof of absence. Depth boundaries may hide descendants. Before coordinate fallback, scope a deeper observe to a visible container or select a short label fragment with Name *fragment* and TimeoutMs 0; exact labels can differ. Use click Auto.'}
     }
     $windows = @(Get-PotatoTopLevelWindows)
     $workingInfo = $null
@@ -1183,7 +1192,8 @@ function Invoke-PotatoSelect {
     if ($maxResults -lt 1 -or $maxResults -gt 1000) { throw 'MaxResults must be 1..1000.' }
     $refresh = -not $inputs.path -and -not $scopeRoot -and [bool]$script:CurrentState.working
     $refreshFocus = -not $inputs.path -and (Get-PotatoArg $ArgsMap @('Scope') 'Working') -eq 'FocusedWindow'
-    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus) |
+    $includeRoot=$refreshFocus -and $windowQuery
+    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus -IncludeRoot:$includeRoot) |
         Select-Object -First $maxResults
 
     [ordered]@{
@@ -1886,8 +1896,8 @@ function Invoke-PotatoScreenshot {
         $region = [ordered]@{
             x = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('X')) 0
             y = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Y')) 0
-            width = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Width')) [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Width
-            height = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Height')) [System.Windows.Forms.Screen]::PrimaryScreen.Bounds.Height
+            width = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Width')) ([PotatoWindowIdentity]::PrimaryWidth())
+            height = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Height')) ([PotatoWindowIdentity]::PrimaryHeight())
         }
     }
     else {
@@ -1899,14 +1909,15 @@ function Invoke-PotatoScreenshot {
             $region = ConvertTo-PotatoRectangle -Rectangle $target.element.Current.BoundingRectangle
         }
         else {
-            $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-            $region = [ordered]@{ x = $screen.X; y = $screen.Y; width = $screen.Width; height = $screen.Height }
+            $region = [ordered]@{ x = 0; y = 0; width = [PotatoWindowIdentity]::PrimaryWidth(); height = [PotatoWindowIdentity]::PrimaryHeight() }
         }
     }
 
     if (-not $region -or $region.width -le 0 -or $region.height -le 0) { throw 'Screenshot target has no usable bounds.' }
     New-PotatoScreenshot -X $region.x -Y $region.y -Width $region.width -Height $region.height -OutFile $outFile -EncoderType $encoder -Quality $quality
-    [ordered]@{ path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($outFile); region = $region; format = $encoder }
+    [ordered]@{ path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($outFile); region = $region; format = $encoder;
+        coordinateSpace='PhysicalScreenPixels'; imageWidth=$region.width; imageHeight=$region.height;
+        hint='Image pixels map to physical screen pixels plus region.x/y. Inspect the image before choosing a fallback point; do not use coordinates from a scaled preview.' }
 }
 
 function Invoke-PotatoCloseWindow {
@@ -2136,8 +2147,13 @@ function Invoke-PotatoCliCommandCore {
     $script:RunsRoot = $null
     $policy = $null
     $dispatched = $false
+    $previousDpi=[IntPtr]::Zero
     try {
         $policy = Get-PotatoInteractionPolicy -ArgsMap $argsMap -Command $normalized
+        if ($normalized -notin @('state','wait-file')) {
+            Initialize-PotatoWindowIdentity
+            $previousDpi=[PotatoWindowIdentity]::EnterPhysicalCoordinates()
+        }
         Initialize-PotatoEnvironment -CliRoot $CliRoot
         Write-PotatoLog -Command $normalized -Message "Command started."
         $dispatched = $true
@@ -2189,6 +2205,7 @@ function Invoke-PotatoCliCommandCore {
         if ($script:CurrentState) { try { Write-PotatoLog -Command $normalized -Level Error -Message $errorObject.message } catch {} }
     }
     finally {
+        if ($previousDpi -ne [IntPtr]::Zero) { [void][PotatoWindowIdentity]::SetThreadDpiAwarenessContext($previousDpi) }
         $watch.Stop()
     }
 

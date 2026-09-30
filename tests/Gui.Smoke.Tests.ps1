@@ -134,6 +134,12 @@ $form.Show(); $form.Hide()
     Invoke-Fixture click @('-Name','Fixture modal opener','-ControlType','Button','-Method','Invoke') | Out-Null
     $compact=Invoke-Fixture observe @('-Scope','FocusedWindow','-Format','Compact','-Depth','4','-MaxElements','40')
     if ($compact.data.root.name -ne 'Fixture modal' -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture cancel'}).Count -ne 1 -or @($compact.data.elements | Where-Object {$_.name -eq 'Fixture input'}).Count) { throw 'FocusedWindow compact observation escaped the owned dialog.' }
+    $dialogRoot=Invoke-Fixture wait-element @('-Scope','FocusedWindow','-Name','Fixture modal','-ControlType','Window','-TimeoutMs','0')
+    if (-not $dialogRoot.data.exists) { throw 'Scoped window wait searched only children and missed the dialog itself.' }
+    $wrongRoot=Invoke-Fixture wait-element @('-Scope','FocusedWindow','-Name',$title,'-ControlType','Window','-TimeoutMs','0')
+    if ($wrongRoot.data.exists) { throw 'Scoped window wait escaped to the parent application.' }
+    $shallow=Invoke-Fixture observe @('-Scope','FocusedWindow','-Format','Compact','-Depth','0','-MaxElements','40')
+    if (-not $shallow.data.depthBoundaryReached -or $shallow.data.limitReached) { throw 'Shallow observation hid its depth boundary or confused it with the element limit.' }
     $guard=@('-TargetMode','Focused','-FallbackReason','Observed selected filename is already focused','-FallbackEvidence','fixture-observation')
     $wrong=Invoke-PotatoCliCommand type ($guard+@('-Text','must not send','-ExpectedFocusJson','{"Name":"Absent"}','-FocusTimeoutMs','0')) -CliRoot $root -AsObject
     $before=Invoke-Fixture read @('-Scope','FocusedWindow','-Name','Fixture filename')

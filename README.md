@@ -7,6 +7,7 @@ It does not import the old `Potato` module and does not include legacy testcases
 ## Requirements
 
 - Windows with an interactive desktop session.
+- Windows 10 version 1607 or newer for thread-scoped DPI handling.
 - Windows PowerShell 5.1 or later.
 - The target application must be visible in the logged-in user session.
 - Run from a normal or elevated PowerShell session depending on the target application. UI Automation is most reliable when the CLI and target application run at the same integrity level.
@@ -32,6 +33,10 @@ Read several needed topics in one call: `help -Topics start,observe,click,type,p
 Click now requires one visible enabled match by default. `AmbiguousTarget` returns candidates before any input, so a navigation item and submit button with the same name cannot silently substitute for each other. Add an observed role, class, ID or parent scope. Existing scripts with intentionally ambiguous selectors can explicitly request `-RequireUnique false` for legacy first-match behavior. Compact candidates include class names and distinguish duplicate labels where the returned tree provides enough information.
 
 For an observed opaque field already in focus, `type -TargetMode Focused -ExpectedFocusJson '{"AutomationId":"<observed-id>"}' -FocusTimeoutMs 2000` waits for that owned focus without clicking or changing its existing text selection. Fallback reason/evidence remain required. Prefer writable `type -PreDelete -Verify` for replacement when text patterns are available. `read` reports `data.textSource` so content assertions can distinguish actual text from an accessible name fallback.
+
+Desktop commands now use physical screen pixels consistently for UIA bounds, mouse input and screenshots, restoring the embedding caller's thread DPI setting after each command. Screenshot dimensions do not depend on WinForms' cached scaled bounds. Old coordinates recorded under a virtualized process must be rediscovered; element-relative clicks remain preferable. Screenshot `region.x/y` gives the origin of its image pixels. Inspect the full-resolution image before choosing fallback points. A `depthBoundaryReached` observation is incomplete below that boundary; try targeted deeper discovery or a short label-fragment search before declaring a control inaccessible.
+
+`wait-element -Scope FocusedWindow -ControlType Window -Name '<observed dialog>'` now matches the dialog itself while remaining restricted to the owned foreground scope.
 
 ## JSON Contract
 

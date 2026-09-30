@@ -9,7 +9,8 @@
     "Use -Flag=value for values starting with a dash. Negative numeric values also work as separate tokens.",
     "GuiNavigation is the default: bounded press-key navigation and audited focused literal input use the GUI. Explicit VisibleControls stays strict and forbids press-key. Application hotkeys/Shortcut clearing require authorized AllowShortcuts; clipboard is unsupported.",
     "Commands use a bounded desktop mutex. DesktopBusy means not dispatched; outcome unknown requires observing the postcondition before retry.",
-    "Invalid bounds are returned as null with boundsStatus/propertyErrors; do not infer missing UIA support from missing geometry."
+    "Invalid bounds are returned as null with boundsStatus/propertyErrors; do not infer missing UIA support from missing geometry.",
+    "UIA bounds, screenshots and mouse points use physical screen pixels in every transport. Desktop commands temporarily set thread DPI awareness and restore it afterwards. Screenshot region.x/y is the image origin; never copy coordinates from a resized preview."
   ],
   "selectorOptions": [
     "Name",
@@ -47,11 +48,11 @@
     },
     "windows": {
       "usage": "windows [-ProcessName app] [-WindowTitle '*title*'] [-TimeoutMs 0]",
-      "notes": "With ProcessId, includes modal Window descendants exposed beneath the owner in UIA; data.windows includes isModal. Close owned dialogs before parent windows."
+      "notes": "With ProcessId, includes modal Window descendants exposed beneath the owner in UIA; data.windows includes isModal. A nonempty windows result is eligible exploration evidence for window/title state. File creation/content need their own receipts. Close owned dialogs before parent windows."
     },
     "observe": {
       "usage": "observe [-Format Compact|Full] [-Scope Working|FocusedWindow] [<selector options>] [-Depth 2] [-MaxElements 120]",
-      "notes": "Compact returns actionable flat elements, focusedElement, live bounds, patterns and candidate name/id selectors; check uniqueness before acting. Full (CLI default) preserves the nested tree. FocusedWindow inspects the foreground window only if it belongs to the working application, useful for native dialogs without relying on IsModal. Name/SelectorJson/PathJson can anchor a subtree. Depth 0..20, MaxElements 1..2000; limitReached in compact output means the node budget was exhausted. Opaque Pane roles can change as providers initialize; prefer minimal name/id constraints."
+      "notes": "Compact returns actionable flat elements, focusedElement, live bounds, patterns and candidate selectors; check uniqueness before acting. Full (CLI default) preserves the nested tree. FocusedWindow inspects the owned foreground window. Name/SelectorJson/PathJson can anchor a subtree. Depth 0..20, MaxElements 1..2000. limitReached means the node budget was exhausted; depthBoundaryReached means descendants at the depth boundary were not inspected (not proof that they exist). A missing control in a bounded tree is not proof of UIA absence. Before coordinate fallback, scope deeper discovery to an observed container or search a short label fragment with select -Name '*fragment*' -TimeoutMs 0. Opaque Pane roles can change as providers initialize."
     },
     "select": {
       "usage": "select <selector options> [-MaxResults 20]",
@@ -86,7 +87,7 @@
     },
     "wait-element": {
       "usage": "wait-element <selector options>",
-      "notes": "Assert data.exists, not just ok. Use the selector's TimeoutMs. Window queries include the working window itself and other process windows; a launched window does not prove the application's next control is ready."
+      "notes": "Assert data.exists, not just ok. Use the selector's TimeoutMs. Window queries in Scope FocusedWindow include the owned foreground dialog itself, not just its descendants. Ordinary window queries include the working window and other process windows. FocusedWindow waits refresh the scope between failed probes. A launched window does not prove the application's next control is ready."
     },
     "wait-file": {
       "usage": "wait-file -Path 'output.ext' [-TimeoutMs 10000] [-MinBytes 1] [-StableMs 500] [-WaitForNotExists]",
@@ -102,7 +103,7 @@
     },
     "screenshot": {
       "usage": "screenshot [-OutFile 'evidence.png'] [<selector options>] [-X 0 -Y 0 -Width 800 -Height 600]",
-      "notes": "Evidence capture alone is not an assertion that the image is correct."
+      "notes": "Returns physical-pixel imageWidth/imageHeight, region and coordinateSpace. Inspect the actual image before choosing a fallback point; a screenshot path alone is not visual inspection. Add region.x/y to image pixel coordinates. Capture alone is not an assertion, and hardcoded coordinates still depend on application layout."
     },
     "close-window": {
       "usage": "close-window [-ProcessName app] [-WindowTitle '*title*'] [-TimeoutMs 0]",
