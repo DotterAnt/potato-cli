@@ -1,5 +1,7 @@
 # PoTATo Agent CLI
 
+For dialog transitions, use `windows -Foreground -WindowTitle '<tested title>' -TimeoutMs 15000`, check `data.count`, then reuse that response's exact `foregroundSelector` with guarded `Scope ForegroundWindow` and fallback evidence. Filters are respected; an absent dialog returns count 0. Guarded commands wait before input for their exact window (TimeoutMs, default 1000) and never activate another window. Window-title queries use native top-level windows, including broker/owned dialogs, rather than full desktop descendants. Observation batches UIA properties into fresh snapshots while action checks use live properties. The framework's `Invoke-ExplorationStream.ps1` retains a warm host and receipt recording across interactive batches.
+
 `potato-cli` is a standalone PowerShell command-line interface for agent-driven Windows UI automation. It is intentionally smaller than the original PoTATo project: it keeps the UI Automation, window, selector, input, screenshot, report, log, and state primitives needed to build repeatable GUI tests for Office and Nucleus-style desktop applications.
 
 It does not import the old `Potato` module and does not include legacy testcases, browser automation, Selenium, image recognition, OCR, Jira integration, VM tooling, or application-specific cleanup helpers.

@@ -55,9 +55,25 @@ function Get-PotatoExplicitScope {
     param([hashtable]$ArgsMap)
     $scope = [string](Get-PotatoArg $ArgsMap @('Scope') 'Working')
     if ($scope -eq 'FocusedWindow') { return Get-PotatoFocusedWindow }
-    if ($scope -eq 'ForegroundWindow') { return Get-PotatoGuardedForegroundWindow (Get-PotatoArg $ArgsMap @('WindowSelectorJson')) }
+    if ($scope -eq 'ForegroundWindow') { return Wait-PotatoGuardedForegroundWindow $ArgsMap }
     if ($scope -ne 'Working') { throw 'Scope must be Working, FocusedWindow or guarded ForegroundWindow.' }
     return $null
+}
+
+function Wait-PotatoGuardedForegroundWindow {
+    param([hashtable]$ArgsMap)
+    $timeout=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('TimeoutMs')) 1000
+    if ($timeout -lt 0 -or $timeout -gt 60000) { throw 'Guarded scope TimeoutMs must be 0..60000.' }
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        try { return Get-PotatoGuardedForegroundWindow (Get-PotatoArg $ArgsMap @('WindowSelectorJson')) }
+        catch {
+            # Retry readiness only, before input. Invalid guards fail immediately;
+            # the exact observed identity and the ownership policy never change.
+            if ($_.Exception.Data['PotatoErrorType'] -ne 'ScopeNotReady' -or $watch.ElapsedMilliseconds -ge $timeout) { throw }
+        }
+        Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(50,$timeout-$watch.ElapsedMilliseconds)))
+    } while ($true)
 }
 
 function Get-PotatoElementIdentityKey {
@@ -128,12 +144,30 @@ function ConvertTo-PotatoCompactElement {
         enabled=$Info.isEnabled; offscreen=$Info.isOffscreen; focused=$Info.hasKeyboardFocus;
         patterns=@($Info.supportedPatterns); bounds=$Info.boundingRectangle; selector=$selector}
     if ($Info.propertyErrors.Count) { $value.propertyErrors = $Info.propertyErrors }
-    if ($Info.controlType -eq 'Pane' -and -not $Info.supportedPatterns.Count) {
-        $value.hint = 'Opaque UIA node. Do not assume Pane is a stable role; inspect focus/screenshot if input is needed.'
-    }
-    if ($Info.controlType -eq 'Edit') { $value.typingHint='Use type with a writable selector. Multiline literals currently require a Document target; do not submit a single-line field with embedded newlines.' }
-    if ($Info.controlType -eq 'Document' -and $Info.supportedPatterns -contains 'Text') { $value.typingHint='Candidate for multiline literal typing; type checks read-only status before input.' }
+    # Shared typing/discovery guidance is returned once by observe/help, never
+    # repeated for every pane/editor in a large tree. Keep all state and selectors.
     return $value
+}
+
+function Get-PotatoObservationSnapshot {
+    param($Element)
+    if ($Element -isnot [Windows.Automation.AutomationElement]) { return $null }
+    if (-not $script:ObservationCacheRequest) {
+        $request=New-Object Windows.Automation.CacheRequest
+        $request.TreeScope=[Windows.Automation.TreeScope]::Element
+        foreach ($name in @('Name','AutomationId','ClassName','LocalizedControlType','ProcessId','NativeWindowHandle',
+            'IsEnabled','IsOffscreen','HasKeyboardFocus','IsKeyboardFocusable','ControlType','BoundingRectangle')) {
+            $request.Add([Windows.Automation.AutomationElement]::("${name}Property"))
+        }
+        $script:ObservationPatternProperties=@([Windows.Automation.AutomationElement].GetFields() | Where-Object {$_.Name -match '^Is.+PatternAvailableProperty$'} | ForEach-Object {
+            [pscustomobject]@{name=($_.Name -replace '^Is|PatternAvailableProperty$','');property=$_.GetValue($null)}
+        })
+        foreach ($pattern in $script:ObservationPatternProperties) { $request.Add($pattern.property) }
+        $request.Add([Windows.Automation.WindowPattern]::IsModalProperty)
+        $script:ObservationCacheRequest=$request
+    }
+    try { return $Element.GetUpdatedCache($script:ObservationCacheRequest) }
+    catch { return $null } # Disappearing/legacy providers retain per-property errors.
 }
 
 function Get-PotatoUniqueSelector {

@@ -728,28 +728,36 @@ function ConvertTo-PotatoRectangle {
 }
 
 function ConvertTo-PotatoElementInfo {
-    param([Parameter(Mandatory)] [object] $Element)
+    param([Parameter(Mandatory)] [object] $Element, [switch]$Snapshot)
     $info = [ordered]@{}
     $errors = @()
+    # Snapshot observation properties in one UIA request. Action checks continue
+    # using live Current values; no element cache survives a desktop transition.
+    $cached=if ($Snapshot) { Get-PotatoObservationSnapshot $Element }
+    $properties=if ($cached) {$cached.Cached} else {$Element.Current}
     foreach ($property in @('Name','AutomationId','ClassName','LocalizedControlType','ProcessId','NativeWindowHandle','IsEnabled','IsOffscreen','HasKeyboardFocus','IsKeyboardFocusable')) {
         $key = $property.Substring(0,1).ToLowerInvariant() + $property.Substring(1)
-        try { $info[$key] = $Element.Current.$property; if ($null -eq $info[$key]) { $errors += "$property unavailable." } }
+        try { $info[$key] = $properties.$property; if ($null -eq $info[$key]) { $errors += "$property unavailable." } }
         catch { $info[$key] = $null; $errors += "$property`: $($_.Exception.Message)" }
     }
     $info.controlType = $null
-    try { $info.controlType = Get-PotatoControlTypeName -Element $Element } catch { $errors += 'ControlType unavailable.' }
+    try { $info.controlType = $properties.ControlType.ProgrammaticName.Replace('ControlType.','') } catch { $errors += 'ControlType unavailable.' }
     $info.processName = ''
     try { $info.processName = (Get-Process -Id $info.processId -ErrorAction Stop).ProcessName } catch {}
     $info.boundingRectangle = $null
-    try { $info.boundingRectangle = ConvertTo-PotatoRectangle $Element.Current.BoundingRectangle } catch { $errors += 'BoundingRectangle unavailable.' }
+    try { $info.boundingRectangle = ConvertTo-PotatoRectangle $properties.BoundingRectangle } catch { $errors += 'BoundingRectangle unavailable.' }
     $info.boundsStatus = if ($info.boundingRectangle) { 'valid' } else { 'empty-invalid-or-unavailable' }
     $info.supportedPatterns = @()
-    try { $info.supportedPatterns = @($Element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName.Replace('PatternIdentifiers.Pattern','') }) }
+    try {
+        if ($cached) { $info.supportedPatterns=@($script:ObservationPatternProperties | Where-Object {$cached.GetCachedPropertyValue($_.property) -eq $true} | ForEach-Object {$_.name}) }
+        else { $info.supportedPatterns = @($Element.GetSupportedPatterns() | ForEach-Object { $_.ProgrammaticName.Replace('PatternIdentifiers.Pattern','') }) }
+    }
     catch { $errors += 'Supported patterns unavailable.' }
     $info.isModal = $false
     try {
         $windowPattern = $null
-        if ($Element.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern, [ref]$windowPattern)) {
+        if ($cached) { $info.isModal=$cached.GetCachedPropertyValue([Windows.Automation.WindowPattern]::IsModalProperty) -eq $true }
+        elseif ($Element.TryGetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern, [ref]$windowPattern)) {
             $info.isModal = [bool]$windowPattern.Current.IsModal
         }
     }
@@ -843,7 +851,15 @@ function Get-PotatoTopLevelWindows {
         $windows = @()
         $processWindows = @()
         try {
-            $all = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+            # Native top-level handles include broker/owned dialogs that some
+            # providers nest beneath their owner. Never search every desktop
+            # descendant just to wait for a window title.
+            Initialize-PotatoWindowIdentity
+            $all=@(foreach ($handle in [PotatoWindowIdentity]::WindowHandles()) {
+                if (-not [PotatoWindowIdentity]::IsWindowVisible([IntPtr]$handle)) { continue }
+                if ($Selector -and $Selector.ProcessId -and [PotatoWindowIdentity]::ProcessId([IntPtr]$handle) -ne [int]$Selector.ProcessId) { continue }
+                try { [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$handle) } catch { }
+            })
             foreach ($window in $all) {
                 if ($Selector -and $Selector.ProcessId -and $window.Current.ProcessId -eq [int]$Selector.ProcessId) { $processWindows += $window }
                 try { $matchesSelector = -not $Selector -or (Test-PotatoElementMatch -Element $window -Selector $Selector) } catch { continue }
@@ -870,6 +886,14 @@ function Get-PotatoTopLevelWindows {
             }
         }
         catch {}
+        $seenWindows=New-Object 'Collections.Generic.HashSet[string]'
+        $windows=@($windows | Where-Object {
+            $key=Get-PotatoElementIdentityKey $_
+            if (-not $key) {
+                try {if ($_.Current.NativeWindowHandle) {$key="$($_.Current.ProcessId):$($_.Current.NativeWindowHandle)"}} catch { }
+            }
+            -not $key -or $seenWindows.Add($key)
+        })
         if ($windows.Count -gt 0 -or $TimeoutMs -le 0) { return $windows }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $stopAt)
@@ -1067,18 +1091,32 @@ function Invoke-PotatoWindows {
     $selector.Recurse = $false
     $timeoutMs = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('TimeoutMs')) 0
     $ticketJson=Get-PotatoArg $ArgsMap @('WindowIdentityJson')
-    $checkpoint=if (ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Checkpoint')) $false) {New-PotatoWindowCheckpoint}
-    $windows = if ($ticketJson) { @(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) } else { @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
-    if (ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Foreground')) $false) {
+    $foreground=ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Foreground')) $false
+    $checkpointRequested=ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Checkpoint')) $false
+    if ($foreground -and ($ticketJson -or $checkpointRequested)) { throw 'Foreground cannot be combined with WindowIdentityJson or Checkpoint.' }
+    $checkpoint=if ($checkpointRequested) {New-PotatoWindowCheckpoint}
+    $windows = @()
+    if ($foreground) {
         Initialize-PotatoWindowIdentity
-        $handle=[PotatoWindowIdentity]::ForegroundRoot()
-        $windows=@(if ($handle -ne [IntPtr]::Zero) {[Windows.Automation.AutomationElement]::FromHandle($handle)})
+        if ($timeoutMs -lt 0 -or $timeoutMs -gt 60000) { throw 'Foreground TimeoutMs must be 0..60000.' }
+        $watch=[Diagnostics.Stopwatch]::StartNew()
+        do {
+            $handle=[PotatoWindowIdentity]::ForegroundRoot()
+            $windows=@(if ($handle -ne [IntPtr]::Zero) {
+                $candidate=[Windows.Automation.AutomationElement]::FromHandle($handle)
+                if (Test-PotatoElementMatch $candidate $selector) { $candidate }
+            })
+            if ($windows.Count -or $watch.ElapsedMilliseconds -ge $timeoutMs) { break }
+            Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(50,$timeoutMs-$watch.ElapsedMilliseconds)))
+        } while ($true)
     }
+    elseif ($ticketJson) { $windows=@(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) }
+    else { $windows=@(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
     [ordered]@{
         count = $windows.Count
         windows = @($windows | ForEach-Object { ConvertTo-PotatoElementInfo -Element $_ })
         checkpointId = $(if ($checkpoint) {$checkpoint.id} else {$null})
-        foregroundSelector = $(if ((Get-PotatoArg $ArgsMap @('Foreground')) -and $windows.Count -eq 1) {
+        foregroundSelector = $(if ($foreground -and $windows.Count -eq 1) {
             @{Name=$windows[0].Current.Name;ClassName=$windows[0].Current.ClassName;ProcessId=$windows[0].Current.ProcessId}
         })
     }
@@ -1116,7 +1154,7 @@ function ConvertTo-PotatoTreeNode {
     if ($identity -and -not $Seen.Add($identity)) { return $null }
     if ($Remaining.Value -le 0) { return $null }
     $Remaining.Value--
-    $info = ConvertTo-PotatoElementInfo -Element $Element
+    $info = ConvertTo-PotatoElementInfo -Element $Element -Snapshot
     $node = [ordered]@{
         element = $info
         children = @()
@@ -1170,12 +1208,12 @@ function Invoke-PotatoObserve {
         $depthBoundary=[ref]$false
         $tree = if ($root) { ConvertTo-PotatoTreeNode $root -Depth $depth -Remaining $remaining -DepthBoundaryReached $depthBoundary }
         return [ordered]@{scope=(Get-PotatoArg $ArgsMap @('Scope') 'Working');
-            root=$(if ($root) { ConvertTo-PotatoElementInfo $root });
+            root=$(if ($tree) { $tree.element });
             focusedElement=(ConvertTo-PotatoCompactElement (Get-PotatoForegroundWindowInfo));
             keyboardFocus=(Get-PotatoNativeInputState);
             elements=@(Get-PotatoCompactElements $tree); limitReached=($remaining.Value -le 0);
             depthBoundaryReached=$depthBoundary.Value;
-            hint='Selectors are candidates, not proof of absence. Depth boundaries may hide descendants. Before coordinate fallback, scope a deeper observe to a visible container or select a short label fragment with Name *fragment* and TimeoutMs 0; exact labels can differ. Use click Auto.'}
+            hint='Selectors are candidates; boundaries can hide descendants. Scope deeper discovery before coordinates. Opaque Pane roles may change. Use click Auto, selector type for Edit, observed focused typing for canvases; multiline needs Document. Inspect screenshots before coordinates.'}
     }
     $windows = @(Get-PotatoTopLevelWindows)
     $workingInfo = $null
@@ -1262,6 +1300,12 @@ function Invoke-PotatoSelect {
     # Window queries also need to see sibling and owned dialog windows.
     $windowQuery = (-not $inputs.path) -and (([string]$inputs.selector.ControlType -eq 'Window') -or [bool]$inputs.selector.WindowTitle)
     $scopeRoot = Get-PotatoExplicitScope $ArgsMap
+    if ($windowQuery -and -not $scopeRoot) {
+        $maxResults=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('MaxResults')) 20
+        if ($maxResults -lt 1 -or $maxResults -gt 1000) { throw 'MaxResults must be 1..1000.' }
+        $windows=@(Get-PotatoTopLevelWindows $inputs.selector (ConvertTo-PotatoInt $inputs.selector.TimeoutMs 1000) | Select-Object -First $maxResults)
+        return [ordered]@{count=$windows.Count;elements=@($windows | ForEach-Object {ConvertTo-PotatoElementInfo $_ -Snapshot})}
+    }
     if (-not $scopeRoot -and ($inputs.selector.ModalOnly -or $windowQuery)) { $scopeRoot=Get-PotatoRootElement }
     $pathResult = Resolve-PotatoSelectorPath -Path $inputs.path -StartParent $scopeRoot
     if (-not $pathResult.ok) { throw "Selector path failed at index $($pathResult.failedIndex)." }
@@ -2293,7 +2337,7 @@ function Invoke-PotatoCliCommandCore {
         }
         Initialize-PotatoEnvironment -CliRoot $CliRoot
         if ($normalized -in @('type','press-key','observe') -and (Get-PotatoArg $argsMap @('Scope')) -eq 'ForegroundWindow') {
-            $scopeRoot=Get-PotatoGuardedForegroundWindow (Get-PotatoArg $argsMap @('WindowSelectorJson'))
+            $scopeRoot=Wait-PotatoGuardedForegroundWindow $argsMap
             $script:InputScope=@{processId=$scopeRoot.Current.ProcessId;nativeWindowHandle=$scopeRoot.Current.NativeWindowHandle;windowScoped=$true}
         }
         Write-PotatoLog -Command $normalized -Message "Command started."

@@ -6,6 +6,7 @@ using System.Text;
 public static class PotatoWindowIdentity {
     delegate bool EnumWindowProc(IntPtr window, IntPtr param);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowProc callback, IntPtr param);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
     public static long[] WindowHandles() {
         var handles=new List<long>();
         if (!EnumWindows((window,param)=>{handles.Add(window.ToInt64());return true;},IntPtr.Zero))
