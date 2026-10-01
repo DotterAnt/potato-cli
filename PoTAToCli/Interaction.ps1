@@ -109,6 +109,9 @@ function Test-PotatoTypedPath {
         if ($Text -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/? .][^\\/?]*\\[^\\/?]+(?:\\|$))') {
             throw 'Provide an absolute drive or UNC filename, not a relative or drive-relative path.'
         }
+        if ($Text.Contains('/')) {
+            throw "GUI filename paths require backslash separators. Use: $($Text.Replace('/','\'))"
+        }
         if ($Text -match '[<>"|?*\x00-\x1f]') { throw 'The filename contains invalid path characters or surrounding quotes.' }
         $fullPath=[IO.Path]::GetFullPath($Text)
         if ($Kind -eq 'Directory') {
@@ -126,6 +129,37 @@ function Test-PotatoTypedPath {
         $failure.Data['NoInputSent']=$true
         throw $failure
     }
+}
+
+function Clear-PotatoEditableText {
+    param([object]$Element, [string]$Method='Selection')
+    # A real empty readback needs no selection or Backspace. Value-only providers
+    # can still accept keyboard input even when they cannot select existing text.
+    $existing=$null
+    try { $existing=Get-PotatoEditableText -Element $Element } catch { }
+    if ($null -ne $existing -and ([string]$existing).Length -eq 0) {
+        return @{method='AlreadyEmpty';inputSent=$false}
+    }
+    if ($Method -eq 'Shortcut') {
+        [System.Windows.Forms.SendKeys]::SendWait('^a')
+    } else {
+        $selection=$null
+        if ($Element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern,[ref]$selection)) {
+            $selection.DocumentRange.Select()
+        } else {
+            Initialize-PotatoWindowIdentity
+            if ([PotatoWindowIdentity]::IsStandardEdit([IntPtr]$Element.Current.NativeWindowHandle,$Element.Current.ProcessId,$true)) {
+                [PotatoWindowIdentity]::SelectEditText([IntPtr]$Element.Current.NativeWindowHandle,$Element.Current.ProcessId)
+            } else {
+                $failure=New-Object InvalidOperationException('PreDelete cannot select existing text. Inspect the field and use a tested visible selection route, or explicit -ClearMethod Shortcut only if permitted by the testcase.')
+                $failure.Data['PotatoErrorType']='TextSelectionUnavailable'
+                $failure.Data['NoInputSent']=$true
+                throw $failure
+            }
+        }
+    }
+    [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
+    return @{method=$Method;inputSent=$true}
 }
 
 # Same-process fields and UIA descendants/Win32-owned dialogs of the actual working

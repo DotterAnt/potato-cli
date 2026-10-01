@@ -75,6 +75,25 @@ $module = Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -
     Check (-not (Test-PotatoTypedTextMatch "first`r`nsecond" "first`nsecond" Exact)) 'Exact mode hid line-ending differences.'
     Check (Test-PotatoTypedTextMatch "first`r`nsecond" "first`nsecond" NormalizedExact) 'Normalized readback failed.'
     Check (Test-PotatoTypedTextMatch "prefix`r`nmarker`r`nend" "marker`nend" NormalizedContains) 'Normalized containment failed.'
+    $valueOnly=[pscustomobject]@{Current=@{NativeWindowHandle=0;ProcessId=$PID};value=''}
+    $valueOnly | Add-Member ScriptMethod TryGetCurrentPattern {param($id,$pattern)
+        if ($id -eq [Windows.Automation.ValuePattern]::Pattern) {
+            $pattern.Value=[pscustomobject]@{Current=@{Value=$this.value;IsReadOnly=$false}};return $true
+        }
+        return $false
+    }
+    $clear=Clear-PotatoEditableText $valueOnly
+    Check ($clear.method -eq 'AlreadyEmpty' -and -not $clear.inputSent) 'An actually empty value-only field required unsupported selection or Backspace.'
+    foreach ($value in @('Existing filename',' ')) {
+        $valueOnly.value=$value
+        $failure=$null
+        try {Clear-PotatoEditableText $valueOnly | Out-Null} catch {$failure=$_.Exception}
+        Check ($failure.Data['PotatoErrorType'] -eq 'TextSelectionUnavailable' -and $failure.Data['NoInputSent']) 'Nonempty value-only text was treated as empty or had an unknown input outcome.'
+    }
+    $valueOnly | Add-Member ScriptMethod TryGetCurrentPattern {param($id,$pattern) return $false} -Force
+    $failure=$null
+    try {Clear-PotatoEditableText $valueOnly | Out-Null} catch {$failure=$_.Exception}
+    Check ($failure.Data['PotatoErrorType'] -eq 'TextSelectionUnavailable') 'Unavailable readback was treated as an empty field.'
     $script:readCount=0
     function Get-PotatoEditableText { param($Element) $script:readCount++; if ($script:readCount -lt 6) {return 'stale'}; return 'updated' }
     $eventual=Wait-PotatoTypedText -Element $field -Expected 'updated' -Mode Exact -TimeoutMs 1200

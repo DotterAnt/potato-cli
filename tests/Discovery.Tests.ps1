@@ -64,6 +64,22 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     Reject {Get-PotatoInteractionPolicy @{Scope='ForegroundWindow'} observe} 'Broker scope accepted without evidence.' | Out-Null
     Reject {Get-PotatoInteractionPolicy $args type} 'Broker scope granted unscoped typing.' | Out-Null
     Reject {Get-PotatoInteractionPolicy ($args+@{Focus=$true}) click} 'Broker scope stole focus.' | Out-Null
+    $script:presenceRoot=New-Node 'Current window'
+    $script:presenceRoot.Current.ControlType=[Windows.Automation.ControlType]::Window
+    $script:presenceRoot | Add-Member ScriptMethod FindFirst {throw 'Descendants must not be queried when the scope root proves presence.'} -Force
+    $script:presenceRoot | Add-Member ScriptMethod FindAll {throw 'Descendants must not be queried when the scope root proves presence.'} -Force
+    $script:CurrentState=@{working=@{processId=123}}
+    function Get-PotatoWorkingElement {$script:presenceRoot}
+    function Get-PotatoExplicitScope {$null}
+    $ready=Invoke-PotatoWaitElement @{Name='Current window';TimeoutMs=0}
+    Check ($ready.exists -and $ready.count -eq 1 -and $ready.elements[0].name -eq 'Current window') 'Presence wait excluded its matching application root or queried broken descendants.'
+    $ready=Invoke-PotatoWaitElement @{SelectorJson='{"Name":"Current window"}';TimeoutMs=0}
+    Check ($ready.exists -and $ready.count -eq 1) 'Structured presence selector excluded its matching scope root.'
+    $script:presenceRoot=New-Node 'Container' @((New-Node 'Duplicate'),(New-Node 'Duplicate'))
+    $ready=Invoke-PotatoWaitElement @{Name='Duplicate';TimeoutMs=0}
+    Check ($ready.exists -and $ready.count -eq 1) 'Presence wait enumerated unnecessary duplicates.'
+    $all=Invoke-PotatoSelect @{Name='Duplicate';TimeoutMs=0}
+    Check ($all.count -eq 2) 'Presence optimization changed select cardinality.'
     $script:reads=0
     function Invoke-PotatoSelect {param($ArgsMap)
         $script:reads++

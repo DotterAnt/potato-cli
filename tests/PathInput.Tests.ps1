@@ -31,6 +31,13 @@ try {
         Check ($validated.validated -and $validated.path -ceq $path -and $validated.parentPath -ceq $folder) 'Literal path was expanded, truncated, or changed.'
         Check (-not [IO.File]::Exists($path)) 'Save validation fabricated output.'
         [IO.File]::WriteAllText($path,'Synthetic existing-file fixture')
+        foreach ($kind in @('SaveFile','OpenFile','Directory')) {
+            $forward=if ($kind -eq 'Directory') {$folder.Replace('\','/')} else {$path.Replace('\','/')}
+            RejectPath $forward $kind
+        }
+        try {Test-PotatoTypedPath $path.Replace('\','/') SaveFile;throw 'Forward slash validation passed.'}
+        catch {Check ($_.Exception.Message.Contains($path)) 'Separator error omitted the literal corrected path.'}
+        Check ([IO.File]::ReadAllText($path) -eq 'Synthetic existing-file fixture') 'Rejected filename altered an existing file.'
         Check (Test-PotatoTypedPath $path OpenFile).validated 'Existing literal file was rejected.'
         Check (Test-PotatoTypedPath $folder Directory).validated 'Existing literal directory was rejected.'
         Check (Test-PotatoTypedPath $path SaveFile).validated 'Existing save target was rejected; overwrite decisions belong to the GUI.'

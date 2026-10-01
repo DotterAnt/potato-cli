@@ -1325,7 +1325,8 @@ function Invoke-PotatoSelect {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [hashtable] $ArgsMap
+        [hashtable] $ArgsMap,
+        [switch] $PresenceOnly
     )
 
     $inputs = Get-PotatoSelectorInputs -ArgsMap $ArgsMap
@@ -1336,6 +1337,7 @@ function Invoke-PotatoSelect {
     if ($windowQuery -and -not $scopeRoot) {
         $maxResults=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('MaxResults')) 20
         if ($maxResults -lt 1 -or $maxResults -gt 1000) { throw 'MaxResults must be 1..1000.' }
+        if ($PresenceOnly) { $maxResults=1 }
         $windows=@(Get-PotatoTopLevelWindows $inputs.selector (ConvertTo-PotatoInt $inputs.selector.TimeoutMs 1000) | Select-Object -First $maxResults)
         return [ordered]@{count=$windows.Count;elements=@($windows | ForEach-Object {ConvertTo-PotatoElementInfo $_ -Snapshot})}
     }
@@ -1346,14 +1348,15 @@ function Invoke-PotatoSelect {
     $maxResults = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('MaxResults')) 20
     $selector = $inputs.selector
     $timeoutMs = ConvertTo-PotatoInt $selector.TimeoutMs 1000
-    $findFirst = ConvertTo-PotatoBool $selector.FindFirst $false
+    $findFirst = $PresenceOnly -or (ConvertTo-PotatoBool $selector.FindFirst $false)
     if ($maxResults -lt 1 -or $maxResults -gt 1000) { throw 'MaxResults must be 1..1000.' }
     $refresh = -not $inputs.path -and -not $scopeRoot -and [bool]$script:CurrentState.working
     $refreshFocus = -not $inputs.path -and (Get-PotatoArg $ArgsMap @('Scope') 'Working') -eq 'FocusedWindow'
     $foregroundSelector=if (-not $inputs.path -and (Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') {Get-PotatoArg $ArgsMap @('WindowSelectorJson')} else {$null}
-    $includeRoot=($refreshFocus -or $foregroundSelector) -and $windowQuery
-    $elements = @(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus -ForegroundSelectorJson $foregroundSelector -IncludeRoot:$includeRoot) |
-        Select-Object -First $maxResults
+    $includeRoot=(($refreshFocus -or $foregroundSelector) -and $windowQuery) -or
+        ($PresenceOnly -and -not $inputs.path -and ($refresh -or $refreshFocus -or $foregroundSelector))
+    $elements = @(@(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus -ForegroundSelectorJson $foregroundSelector -IncludeRoot:$includeRoot) |
+        Select-Object -First $maxResults)
 
     [ordered]@{
         count = $elements.Count
@@ -1775,35 +1778,25 @@ function Invoke-PotatoType {
     $clearMethod = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('ClearMethod') -Default 'Selection')
     if ($clearMethod -notin @('Selection', 'Shortcut')) { throw 'ClearMethod must be Selection or Shortcut.' }
     if ($verify) { [void](Get-PotatoEditableText -Element $element) }
+    $clearInputSent=$false
     if ($preDelete) {
-        if ($clearMethod -eq 'Shortcut') {
-            [System.Windows.Forms.SendKeys]::SendWait('^a')
-        }
-        else {
-            $selection = $null
-            if ($element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$selection)) {
-                $selection.DocumentRange.Select()
-            } elseif ([PotatoWindowIdentity]::IsStandardEdit([IntPtr]$element.Current.NativeWindowHandle,$element.Current.ProcessId,$true)) {
-                [PotatoWindowIdentity]::SelectEditText([IntPtr]$element.Current.NativeWindowHandle,$element.Current.ProcessId)
-            } else {
-                throw 'PreDelete requires TextPattern selection. Use the visible selection route, or explicit -ClearMethod Shortcut only if permitted by the testcase.'
-            }
-        }
-        [System.Windows.Forms.SendKeys]::SendWait('{BACKSPACE}')
+        $cleared=Clear-PotatoEditableText -Element $element -Method $clearMethod
+        $clearMethod=$cleared.method
+        $clearInputSent=$cleared.inputSent
     }
 
     if (-not ('PotatoLiteralInput' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'LiteralInput.cs') }
     try {
         if ($opaque) { Assert-PotatoInputFocusUnchanged $inputFocus }
-        else { Assert-PotatoForegroundInput $element -NoInputSent:(-not $preDelete) }
+        else { Assert-PotatoForegroundInput $element -NoInputSent:(-not $clearInputSent) }
     } catch {
-        if ($preDelete) { $_.Exception.Data['NoInputSent']=$false }
+        if ($clearInputSent) { $_.Exception.Data['NoInputSent']=$false }
         throw
     }
     $native=Get-PotatoNativeInputState
     if (-not $native.ready) {
         $failure=New-PotatoFocusFailure 'Native keyboard target is not ready. No text was sent; inspect error.focus before retrying.' $native
-        $failure.Data['NoInputSent']=-not $preDelete
+        $failure.Data['NoInputSent']=-not $clearInputSent
         throw $failure
     }
     [PotatoLiteralInput]::SendText([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle)
@@ -1951,7 +1944,7 @@ function Invoke-PotatoWaitElement {
         $watch=[Diagnostics.Stopwatch]::StartNew(); $probe=$ArgsMap.Clone(); $probe.TimeoutMs=0
         $lastScopeError=$null
         do {
-            try { $result=Invoke-PotatoSelect $probe; $lastScopeError=$null }
+            try { $result=Invoke-PotatoSelect $probe -PresenceOnly; $lastScopeError=$null }
             catch {
                 if ($_.Exception.Data['PotatoErrorType'] -ne 'ScopeNotReady') {throw}
                 $lastScopeError=$_.Exception.Message; $result=@{count=0;elements=@()}
@@ -1959,7 +1952,7 @@ function Invoke-PotatoWaitElement {
             if ($result.count -gt 0 -or $watch.ElapsedMilliseconds -ge $timeout) {break}
             Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(100,$timeout-$watch.ElapsedMilliseconds)))
         } while ($true)
-    } else { $result = Invoke-PotatoSelect -ArgsMap $ArgsMap }
+    } else { $result = Invoke-PotatoSelect -ArgsMap $ArgsMap -PresenceOnly }
     [ordered]@{
         exists = ($result.count -gt 0)
         count = $result.count

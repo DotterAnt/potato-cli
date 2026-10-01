@@ -20,7 +20,7 @@ For shared application hosts, `start -RequireNewWindow` (the framework default) 
 
 After a GUI close, use `windows -WindowIdentityJson <ownedWindow JSON> -WaitForNotExists -TimeoutMs 5000` and assert `data.conditionMet`. An explicit selector also works. It polls for disappearance and returns as soon as the window is gone. Ordinary `windows -TimeoutMs` waits for appearance, so using it after closing needlessly consumes the whole deadline. Absence waits reject incomplete enumeration and require a selector; they cannot combine with Foreground or Checkpoint.
 
-Filename entry with `type -PathKind SaveFile|OpenFile|Directory` now defaults to exact readback. Standard Windows Edit fields support readback and text selection even without UIA patterns (`read` reports `textSource: Win32Edit`). `PreDelete` can use that selection in Focused mode too. All text is still sent as keyboard input; no clipboard or direct text setter is used.
+Filename entry with `type -PathKind SaveFile|OpenFile|Directory` now defaults to exact readback. Use absolute paths with backslash separators (`Join-Path`); forward slashes fail before input with a corrected-path hint. Standard Windows Edit fields support readback and text selection even without UIA patterns (`read` reports `textSource: Win32Edit`). `PreDelete` skips selection/Backspace when actual readback proves the field is empty (`clearMethod: AlreadyEmpty`). Nonempty unsupported selection fails before text input. All text is still sent as keyboard input; no clipboard or direct text setter is used.
 
 ## Requirements
 
