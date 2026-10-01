@@ -82,6 +82,8 @@ $form.Show();$form.Hide()
     Check ($ready.data.count -eq 1 -and $ready.data.foregroundSelector.Name -eq 'PoTATo delayed dialog') 'Foreground wait ignored the expected title.'
     $guard=$ready.data.foregroundSelector | ConvertTo-Json -Compress
     $scope=@('-Scope','ForegroundWindow','-WindowSelectorJson',$guard,'-FallbackReason','Observed fixture dialog','-FallbackEvidence','Exact foreground window receipt')
+    $focused=Run observe ($scope+@('-Depth','0','-MaxElements','1','-Format','Compact'))
+    Check ($focused.data.focusedElement.id -eq 'DialogFilename' -and $focused.data.elements.Count -eq 1 -and $focused.data.depthBoundaryReached) 'Focus-only observation lost the actual editor or claimed full discovery.'
     $typed=Run type ($scope+@('-AutomationId','DialogFilename','-Text','literal test','-Verify','-TimeoutMs','1000'))
     Check $typed.data.verified 'Guarded dialog typing failed readback.'
     Run click ($scope+@('-Name','Cancel')) | Out-Null
@@ -93,7 +95,8 @@ $form.Show();$form.Hide()
     $window=Run wait-element @('-Name','PoTATo delayed dialog','-ControlType','Window','-TimeoutMs','1000')
     Check ($window.data.exists -and $window.data.count -eq 1) 'Window wait missed the native owned dialog.'
     Run click ($scope+@('-Name','Cancel')) | Out-Null
-    $result=@{checks=$script:checks;measurement=$measurement}
+    $result=@{checks=$script:checks;measurement=$measurement;boundedTreeObserveMs=$observe.durationMs;focusOnlyObserveMs=$focused.durationMs;
+        note='Full bounded tree and focus-only observe inspect different states/data; focus-only is sufficient only when the current target is the needed observation.'}
     if ($OutFile) {$result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $OutFile -Encoding UTF8}
     $result | ConvertTo-Json -Depth 5 -Compress
 } finally {
