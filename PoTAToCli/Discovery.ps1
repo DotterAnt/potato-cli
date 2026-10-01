@@ -9,6 +9,9 @@ function New-PotatoScopeFailure {
 function Get-PotatoGuardedForegroundWindow {
     param([string]$WindowSelectorJson)
     $selector=ConvertFrom-PotatoJsonArgument $WindowSelectorJson
+    if ($selector -is [string]) {
+        throw 'WindowSelectorJson decoded to a string, not an object. The guard may be double-encoded: pass the JSON object or its JSON text once; do not serialize JSON text again. No action was dispatched.'
+    }
     # A broker is a per-command GUI scope, never an adopted process or cleanup target.
     $keys=if ($selector -is [Collections.IDictionary]) {@($selector.Keys)} else {@($selector.PSObject.Properties.Name)}
     if (-not $selector -or -not ($selector.Name -is [string]) -or [string]::IsNullOrWhiteSpace($selector.Name) -or

@@ -56,6 +56,9 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     foreach ($json in @('{}','{"Name":"Broker"}','{"Name":"Broker","ClassName":"Frame","Regex":true}','{"Name":"Broker","ClassName":"Frame","ProcessId":-1}','{"Name":"Broker","ClassName":"Frame","ProcessId":0}')) {
         Reject {Get-PotatoGuardedForegroundWindow $json} 'Invalid foreground guard accepted.' | Out-Null
     }
+    $doubleEncoded=ConvertTo-Json -InputObject '{"Name":"Broker","ClassName":"Frame"}' -Compress
+    $failure=Reject {Get-PotatoGuardedForegroundWindow $doubleEncoded} 'Double-encoded guard was accepted.'
+    Check ($failure.Message -match 'double-encoded' -and $failure.Message -match 'No action was dispatched') 'Guard error did not explain string/object serialization.'
     $args=@{Scope='ForegroundWindow';FallbackReason='Observed broker';FallbackEvidence='fixture'}
     Check ((Get-PotatoInteractionPolicy $args click).mode -eq 'GuiNavigation') 'Guarded visible click was forbidden.'
     Reject {Get-PotatoInteractionPolicy @{Scope='ForegroundWindow'} observe} 'Broker scope accepted without evidence.' | Out-Null
