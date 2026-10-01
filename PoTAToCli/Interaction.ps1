@@ -156,16 +156,31 @@ function Initialize-PotatoWindowIdentity {
 }
 
 function Assert-PotatoForegroundInput {
-    param([object] $Element)
+    param([object] $Element,[bool] $NoInputSent=$true)
     $native=Get-PotatoNativeInputState
     if (-not $Element -or -not $Element.Current.IsEnabled -or -not (Test-PotatoNativeElementFocus $Element $native)) {
-        throw 'Input requires enabled keyboard focus in the working application or its owned dialog. Observe and visibly focus the target before retrying.'
+        try {
+            if ($Element) {$native.expectedTarget=@{name=$Element.Current.Name;automationId=$Element.Current.AutomationId;
+                nativeWindowHandle=$Element.Current.NativeWindowHandle;processId=$Element.Current.ProcessId;
+                hasKeyboardFocus=$Element.Current.HasKeyboardFocus;isEnabled=$Element.Current.IsEnabled}}
+        } catch { } # A stale provider must not replace the original focus failure.
+        $failure=New-PotatoFocusFailure 'Input requires enabled keyboard focus in the working application or its owned dialog. Inspect error.focus and visibly focus the observed target before retrying.' $native
+        $failure.Data['NoInputSent']=$NoInputSent
+        throw $failure
     }
     Initialize-PotatoWindowIdentity
     $handle = [PotatoWindowIdentity]::GetForegroundWindow()
-    if ($handle -eq [IntPtr]::Zero) { throw 'No foreground window; no input was sent.' }
+    if ($handle -eq [IntPtr]::Zero) {
+        $failure=New-PotatoFocusFailure 'No foreground window; inspect error.focus before retrying.' $native
+        $failure.Data['NoInputSent']=$NoInputSent
+        throw $failure
+    }
     $foreground = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
-    if (-not (Test-PotatoInputOwnership $foreground)) { throw 'Foreground changed to another application; no input was sent.' }
+    if (-not (Test-PotatoInputOwnership $foreground)) {
+        $failure=New-PotatoFocusFailure 'Foreground changed to another application; inspect error.focus before retrying.' $native 'InputFocusChanged'
+        $failure.Data['NoInputSent']=$NoInputSent
+        throw $failure
+    }
 }
 
 function Invoke-PotatoPressKey {

@@ -18,6 +18,8 @@ For an observed system-hosted dialog, `-Scope ForegroundWindow -WindowSelectorJs
 
 For shared application hosts, `start -RequireNewWindow` (the framework default) waits for a new visible window without demanding a new process. Cleanup uses an `ownedWindow` receipt with process identity and a window-lifetime token, preserving preexisting windows and the host. For a GUI action that opens another app, use `windows -Checkpoint` before the action and `focus -SinceCheckpoint <checkpointId>` with the observed new window selector afterwards. Plain `focus` switches windows without claiming cleanup ownership. `close-window -WindowIdentityJson <ownedWindow JSON>` closes only that window; `windows` accepts the same receipt to verify closure.
 
+After a GUI close, use `windows -WindowIdentityJson <ownedWindow JSON> -WaitForNotExists -TimeoutMs 5000` and assert `data.conditionMet`. An explicit selector also works. It polls for disappearance and returns as soon as the window is gone. Ordinary `windows -TimeoutMs` waits for appearance, so using it after closing needlessly consumes the whole deadline. Absence waits reject incomplete enumeration and require a selector; they cannot combine with Foreground or Checkpoint.
+
 Filename entry with `type -PathKind SaveFile|OpenFile|Directory` now defaults to exact readback. Standard Windows Edit fields support readback and text selection even without UIA patterns (`read` reports `textSource: Win32Edit`). `PreDelete` can use that selection in Focused mode too. All text is still sent as keyboard input; no clipboard or direct text setter is used.
 
 ## Requirements

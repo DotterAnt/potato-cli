@@ -27,6 +27,12 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     Reject {Wait-PotatoInputFocus '' 0} 'Unowned focus was accepted without an identity selector.'
     Reject {Wait-PotatoInputFocus '{}' 0} 'Empty expected identity accepted.'
     Reject {Wait-PotatoInputFocus '{"Name":"Canvas"}' 10001} 'Unbounded focus wait accepted.'
+    function Test-PotatoNativeElementFocus {$false}
+    $focusFailure=$null
+    try {Assert-PotatoForegroundInput $nativeField} catch {$focusFailure=$_.Exception}
+    Check ($focusFailure.Data['PotatoErrorType'] -eq 'InputFocusNotReady' -and $focusFailure.Data['NoInputSent'] -and $focusFailure.Data['focus'].foregroundHandle -eq 404 -and $focusFailure.Data['focus'].expectedTarget.name -eq 'Filename') 'Writable input lost expected/native focus diagnostics or claimed a dispatch.'
+    try {Assert-PotatoForegroundInput $nativeField -NoInputSent:$false} catch {$focusFailure=$_.Exception}
+    Check ($focusFailure.Data['NoInputSent'] -eq $false) 'Focus failure after clearing claimed no previous input.'
     Initialize-PotatoWindowIdentity
     foreach ($text in @(([string][char]0xd800+'x'),([string][char]0xdc00))) {
         $invalid=$null

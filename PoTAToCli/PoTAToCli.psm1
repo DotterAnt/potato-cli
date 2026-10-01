@@ -842,13 +842,16 @@ function Get-PotatoTopLevelWindows {
     [CmdletBinding()]
     param(
         [object] $Selector = $null,
-        [int] $TimeoutMs = 0
+        [int] $TimeoutMs = 0,
+        [switch] $RequireComplete
     )
 
-    $root = Get-PotatoRootElement
+    # Native handles are authoritative here; retrieving the unused desktop UIA
+    # root adds a provider round trip to every window poll.
     $stopAt = (Get-Date).AddMilliseconds($TimeoutMs)
     do {
         $windows = @()
+        $enumerationError=$null
         $processWindows = @()
         try {
             # Native top-level handles include broker/owned dialogs that some
@@ -858,11 +861,16 @@ function Get-PotatoTopLevelWindows {
             $all=@(foreach ($handle in [PotatoWindowIdentity]::WindowHandles()) {
                 if (-not [PotatoWindowIdentity]::IsWindowVisible([IntPtr]$handle)) { continue }
                 if ($Selector -and $Selector.ProcessId -and [PotatoWindowIdentity]::ProcessId([IntPtr]$handle) -ne [int]$Selector.ProcessId) { continue }
-                try { [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$handle) } catch { }
+                try { [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$handle) }
+                catch { if ([PotatoWindowIdentity]::IsWindowVisible([IntPtr]$handle)) { $enumerationError=$_.Exception.Message } }
             })
             foreach ($window in $all) {
                 if ($Selector -and $Selector.ProcessId -and $window.Current.ProcessId -eq [int]$Selector.ProcessId) { $processWindows += $window }
-                try { $matchesSelector = -not $Selector -or (Test-PotatoElementMatch -Element $window -Selector $Selector) } catch { continue }
+                try { $matchesSelector = -not $Selector -or (Test-PotatoElementMatch -Element $window -Selector $Selector) }
+                catch {
+                    if ([PotatoWindowIdentity]::IsWindowVisible([IntPtr]$window.Current.NativeWindowHandle)) { $enumerationError=$_.Exception.Message }
+                    continue
+                }
                 if ($matchesSelector) {
                     $windows += $window
                 }
@@ -881,11 +889,16 @@ function Get-PotatoTopLevelWindows {
                             if (Test-PotatoElementMatch -Element $candidate -Selector $Selector) { $windows += $candidate }
                         }
                     }
-                    catch {}
+                    catch { if ([PotatoWindowIdentity]::IsWindowVisible([IntPtr]$owner.Current.NativeWindowHandle)) { $enumerationError=$_.Exception.Message } }
                 }
             }
         }
-        catch {}
+        catch { $enumerationError=$_.Exception.Message }
+        if ($RequireComplete -and $enumerationError) {
+            $failure=New-Object InvalidOperationException("Window enumeration was incomplete; absence is unproven. $enumerationError")
+            $failure.Data['PotatoErrorType']='WindowEnumerationIncomplete'
+            throw $failure
+        }
         $seenWindows=New-Object 'Collections.Generic.HashSet[string]'
         $windows=@($windows | Where-Object {
             $key=Get-PotatoElementIdentityKey $_
@@ -1093,10 +1106,24 @@ function Invoke-PotatoWindows {
     $ticketJson=Get-PotatoArg $ArgsMap @('WindowIdentityJson')
     $foreground=ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Foreground')) $false
     $checkpointRequested=ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Checkpoint')) $false
+    $waitForNotExists=ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('WaitForNotExists')) $false
+    if ($timeoutMs -lt 0 -or $timeoutMs -gt 60000) { throw 'Windows TimeoutMs must be 0..60000.' }
+    if ($waitForNotExists -and ($foreground -or $checkpointRequested -or -not ($ticketJson -or $selector.Name -or $selector.WindowTitle -or $selector.AutomationId -or $selector.ClassName -or $selector.ProcessName -or $selector.ProcessId))) {
+        throw 'WaitForNotExists requires an explicit window selector or WindowIdentityJson; it cannot combine with Foreground or Checkpoint.'
+    }
     if ($foreground -and ($ticketJson -or $checkpointRequested)) { throw 'Foreground cannot be combined with WindowIdentityJson or Checkpoint.' }
     $checkpoint=if ($checkpointRequested) {New-PotatoWindowCheckpoint}
     $windows = @()
-    if ($foreground) {
+    if ($waitForNotExists) {
+        $watch=[Diagnostics.Stopwatch]::StartNew()
+        do {
+            $windows=@(if ($ticketJson) {Get-PotatoTicketWindow $ticketJson | Where-Object {$_}}
+                else {Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs 0 -RequireComplete})
+            if (-not $windows.Count -or $watch.ElapsedMilliseconds -ge $timeoutMs) {break}
+            Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(50,$timeoutMs-$watch.ElapsedMilliseconds)))
+        } while ($true)
+    }
+    elseif ($foreground) {
         Initialize-PotatoWindowIdentity
         if ($timeoutMs -lt 0 -or $timeoutMs -gt 60000) { throw 'Foreground TimeoutMs must be 0..60000.' }
         $watch=[Diagnostics.Stopwatch]::StartNew()
@@ -1112,7 +1139,7 @@ function Invoke-PotatoWindows {
     }
     elseif ($ticketJson) { $windows=@(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) }
     else { $windows=@(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
-    [ordered]@{
+    $result=[ordered]@{
         count = $windows.Count
         windows = @($windows | ForEach-Object { ConvertTo-PotatoElementInfo -Element $_ })
         checkpointId = $(if ($checkpoint) {$checkpoint.id} else {$null})
@@ -1120,6 +1147,12 @@ function Invoke-PotatoWindows {
             @{Name=$windows[0].Current.Name;ClassName=$windows[0].Current.ClassName;ProcessId=$windows[0].Current.ProcessId}
         })
     }
+    if ($waitForNotExists) {
+        $result.waitForNotExists=$true
+        $result.conditionMet=$windows.Count -eq 0
+        $result.timedOut=-not $result.conditionMet
+    }
+    $result
 }
 
 function Get-PotatoForegroundWindowInfo {
@@ -1760,9 +1793,19 @@ function Invoke-PotatoType {
     }
 
     if (-not ('PotatoLiteralInput' -as [type])) { Add-Type -Path (Join-Path $PSScriptRoot 'LiteralInput.cs') }
-    if ($opaque) { Assert-PotatoInputFocusUnchanged $inputFocus } else { Assert-PotatoForegroundInput $element }
+    try {
+        if ($opaque) { Assert-PotatoInputFocusUnchanged $inputFocus }
+        else { Assert-PotatoForegroundInput $element -NoInputSent:(-not $preDelete) }
+    } catch {
+        if ($preDelete) { $_.Exception.Data['NoInputSent']=$false }
+        throw
+    }
     $native=Get-PotatoNativeInputState
-    if (-not $native.ready) { throw (New-PotatoFocusFailure 'Native keyboard target is not ready. No input was sent.' $native) }
+    if (-not $native.ready) {
+        $failure=New-PotatoFocusFailure 'Native keyboard target is not ready. No text was sent; inspect error.focus before retrying.' $native
+        $failure.Data['NoInputSent']=-not $preDelete
+        throw $failure
+    }
     [PotatoLiteralInput]::SendText([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle)
     $typedOk = $null
     $verification = $null
