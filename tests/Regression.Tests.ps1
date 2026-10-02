@@ -47,12 +47,14 @@ try {
             $result = Invoke-PotatoWaitFile @{Path=$file;TimeoutMs=3000;MinBytes=3;StableMs=400}
             $writer.EndInvoke($pending) | Out-Null
             Check ($result.conditionMet -and $result.length -eq 3 -and $watch.ElapsedMilliseconds -ge 650) ('Wait did not account for same-size rewrites: elapsed='+$watch.ElapsedMilliseconds+' result='+($result | ConvertTo-Json -Compress)+' msSinceLastWrite='+([datetime]::UtcNow-[IO.File]::GetLastWriteTimeUtc($file)).TotalMilliseconds)
+            Check ([datetime]::Parse($result.lastWriteTimeUtc).ToUniversalTime() -eq [IO.File]::GetLastWriteTimeUtc($file) -and [datetime]::Parse($result.creationTimeUtc).ToUniversalTime() -eq [IO.File]::GetCreationTimeUtc($file)) 'File wait omitted or changed the timestamps required for fresh output validation.'
         }
         finally { $writer.Dispose() }
         $result = Invoke-PotatoWaitFile @{Path=$testRoot;TimeoutMs=0}
         Check (-not $result.conditionMet) 'A directory was treated as a file.'
         $result = Invoke-PotatoWaitFile @{Path=(Join-Path $testRoot 'missing');TimeoutMs=0;WaitForNotExists=$true}
         Check $result.conditionMet 'Missing-file condition failed.'
+        Check ($result.waitForNotExists -and $null -eq $result.lastWriteTimeUtc -and $null -eq $result.creationTimeUtc) 'Missing-file wait retained stale file metadata.'
         $threw = $false
         try { Invoke-PotatoWaitFile @{Path=$file;WaitForNotExists=$true;StableMs=100} | Out-Null } catch { $threw = $true }
         Check $threw 'Incompatible file conditions were accepted.'

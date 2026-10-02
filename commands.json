@@ -35,8 +35,8 @@
   ],
   "commands": {
     "help": {
-      "usage": "help [-Topic type | -Topics start,observe,click,type,press-key]",
-      "notes": "Read command guidance without a desktop session or state mutation. Topics combines several commands with one copy of shared rules; avoid separate process starts for each topic."
+      "usage": "help [-Topic type | -Topics start,observe,click,type,press-key] [-Format Compact|Full]",
+      "notes": "Read command guidance without a desktop session or state mutation. Compact returns signatures and selector option names; Full (default) includes behavioral guidance. Topics combines requested names in one call."
     },
     "state": {
       "usage": "state [-Clear]",
@@ -106,7 +106,7 @@
     },
     "wait-file": {
       "usage": "wait-file -Path 'output.ext' [-TimeoutMs 10000] [-MinBytes 1] [-StableMs 500] [-WaitForNotExists]",
-      "notes": "Assert data.conditionMet. StableMs requires unchanged length AND last-write time. Directories are not files. Stability alone does not prove file validity or content. Use unique execution paths to avoid stale-file passes."
+      "notes": "Assert data.conditionMet. StableMs requires unchanged length AND last-write time. Returns lastWriteTimeUtc, creationTimeUtc and waitForNotExists so callers can reject stale outputs. Directories are not files. Stability alone does not prove validity/content; use unique execution paths."
     },
     "read": {
       "usage": "read <selector options>",

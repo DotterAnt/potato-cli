@@ -2047,6 +2047,7 @@ function Invoke-PotatoWaitFile {
     do {
         $exists = Test-Path -LiteralPath $path
         $length = $null
+        $item = $null
         if ($waitForNotExists) { $conditionMet = -not $exists }
         elseif ($exists) {
             try {
@@ -2065,7 +2066,9 @@ function Invoke-PotatoWaitFile {
         Start-Sleep -Milliseconds ([Math]::Min(100, [Math]::Max(1, $timeoutMs - $watch.ElapsedMilliseconds)))
     } while ($true)
 
-    [ordered]@{ path = [string]$path; exists = $exists; conditionMet = $conditionMet; length = $length; minBytes = $minBytes; stableMs = $stableMs; timedOut = (-not $conditionMet) }
+    [ordered]@{ path = [string]$path; exists = $exists; conditionMet = $conditionMet; length = $length; minBytes = $minBytes; stableMs = $stableMs;
+        waitForNotExists=$waitForNotExists;lastWriteTimeUtc=$(if ($exists -and $item) {$item.LastWriteTimeUtc.ToString('o')} else {$null});
+        creationTimeUtc=$(if ($exists -and $item) {$item.CreationTimeUtc.ToString('o')} else {$null});timedOut = (-not $conditionMet) }
 }
 
 function Get-PotatoElementText {
@@ -2434,6 +2437,16 @@ function Invoke-PotatoCliCommandCore {
                 $result = @{ topic = $topic; help = $help.commands.$topic; rules = $help.rules; globalOptions = $help.globalOptions; selectorOptions = $help.selectorOptions }
             }
             else { $result = $help }
+            $helpFormat=Get-PotatoArg -ArgsMap $argsMap -Names @('Format') -Default 'Full'
+            if ($helpFormat -notin @('Full','Compact')) {throw 'Help Format must be Compact or Full.'}
+            if ($helpFormat -eq 'Compact') {
+                $compact=[ordered]@{}
+                $names=if ($topics) {@($selected.Keys)} elseif ($topic) {@($topic)} else {@($help.commands.PSObject.Properties.Name)}
+                foreach ($name in $names) {$compact[$name]=@{usage=$help.commands.$name.usage}}
+                $result=@{commands=$compact;unknownTopics=@($unknown);selectorOptions=$help.selectorOptions;
+                    note='Signatures only. Use help -Topics <missing names> -Format Full for behavioral details. Selector Name is wildcard by default; Regex explicitly changes its interpretation.'}
+                if ($unknown.Count) {$result.availableTopics=@($help.commands.PSObject.Properties.Name)}
+            }
         }
         catch { $ok = $false; $errorObject = @{ message = $_.Exception.Message; type = 'HelpError' } }
         return @{ ok = $ok; command = 'help'; data = $result; error = $errorObject; session = $null; logPath = $null; durationMs = $watch.ElapsedMilliseconds }
