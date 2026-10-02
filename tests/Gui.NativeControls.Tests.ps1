@@ -41,6 +41,8 @@ public class NativeControlFixture : Form {
         SlowEdit=new DeferredEdit(edit);
         var completion=CreateWindowExW(0,"Edit","",0x50010080,20,190,290,25,Handle,new IntPtr(105),IntPtr.Zero,IntPtr.Zero);
         CompletionEdit=new DeferredEdit(completion,true);
+        var delayed=CreateWindowExW(0,"Edit","",0x50010080,20,275,290,25,Handle,new IntPtr(106),IntPtr.Zero,IntPtr.Zero);
+        DelayedEdit=new DeferredEdit(delayed,false,800);
     }
     protected override void WndProc(ref Message m) {
         base.WndProc(ref m);
@@ -51,6 +53,7 @@ public class NativeControlFixture : Form {
     }
     public DeferredEdit SlowEdit;
     public DeferredEdit CompletionEdit;
+    public DeferredEdit DelayedEdit;
 }
 // Models an editor which consumes a Unicode scalar asynchronously. Events
 // arriving while its autocomplete work is pending are dropped by this fixture.
@@ -59,8 +62,8 @@ public class DeferredEdit : NativeWindow {
     [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr h,uint msg,IntPtr w,IntPtr l);
     [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageW")] static extern IntPtr SendTextMessage(IntPtr h,uint msg,IntPtr w,string text);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h,System.Text.StringBuilder text,int capacity);
-    public DeferredEdit(IntPtr handle,bool complete=false) {
-        AssignHandle(handle);timer.Interval=25;
+    public DeferredEdit(IntPtr handle,bool complete=false,int firstDelay=25) {
+        AssignHandle(handle);timer.Interval=firstDelay;
         timer.Tick+=(s,e)=>{timer.Stop();delivering=true;try {
             SendMessageW(Handle,0x102,character,IntPtr.Zero);
             var value=new System.Text.StringBuilder(256);GetWindowTextW(Handle,value,value.Capacity);
@@ -69,7 +72,7 @@ public class DeferredEdit : NativeWindow {
                 SendTextMessage(Handle,0xC,IntPtr.Zero,suggestion);
                 SendMessageW(Handle,0xB1,new IntPtr(1),new IntPtr(suggestion.Length));
             }
-        } finally {delivering=false;pending=false;}};
+        } finally {delivering=false;pending=false;timer.Interval=25;}};
     }
     protected override void WndProc(ref Message message) {
         if (message.Msg==0x102 && !delivering && message.WParam.ToInt64()>=32) {
@@ -136,6 +139,8 @@ $form.Show();$form.Hide()
     Check ($read.data.text -ceq $text) 'Actual asynchronous Edit content differs from the requested text.'
     $completed=Invoke-Fixture type @('-AutomationId','105','-Text',$text,'-PreDelete','-Verify')
     Check ($completed.data.verified -and $completed.data.consumptionAcknowledged -and (Invoke-Fixture read @('-AutomationId','105')).data.text -ceq $text) 'Selected autocomplete suffix blocked typing or substituted for final exact readback.'
+    $delayed=Invoke-Fixture type @('-AutomationId','106','-Text','slow','-PreDelete','-Verify','-VerifyTimeoutMs','1500')
+    Check ($delayed.data.verified -and $delayed.data.consumptionAcknowledged -and (Invoke-Fixture read @('-AutomationId','106')).data.text -ceq 'slow') 'Prefix acknowledgement ignored the requested verification timeout and stopped before the delayed control consumed input.'
     $rejected=Invoke-PotatoCliCommand type @('-AutomationId','104','-Text','start!tail','-PreDelete','-Verify','-InputDelayMs','5') -CliRoot $root -AsObject
     Check (-not $rejected.ok -and $rejected.error.type -eq 'TextConsumptionFailed' -and $rejected.outcome -eq 'unknown') 'Lost text was repeated or treated as no-input/success.'
     $read=Invoke-Fixture read @('-AutomationId','104')

@@ -1848,7 +1848,7 @@ function Invoke-PotatoType {
         # Readback provides pacing on this path. Honor explicit/legacy delays,
         # but don't sleep blindly when an ordinary Edit already consumed input.
         if (-not $ArgsMap.ContainsKey('InputDelayMs') -and -not $typeByCharacter) {$inputDelayMs=0}
-        try {[PotatoLiteralInput]::SendTextAcknowledged([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle,[int]$targetInfo.processId)}
+        try {[PotatoLiteralInput]::SendTextAcknowledged([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle,[int]$targetInfo.processId,$verifyTimeoutMs)}
         catch {
             $diagnostic=$_.Exception;while ($diagnostic.InnerException) {$diagnostic=$diagnostic.InnerException}
             if ($clearInputSent) {$diagnostic.Data['NoInputSent']=$false}
@@ -2555,7 +2555,7 @@ function Invoke-PotatoCliCommandCore {
             $errorObject.candidates=$diagnostic.Data['candidates']
             if ($diagnostic.Data['focus']) { $errorObject.focus=$diagnostic.Data['focus'] }
             if ($diagnostic.Data['blockingDialog']) { $errorObject.blockingDialog=$diagnostic.Data['blockingDialog'] }
-            if ($diagnostic.Data.Contains('observedText')) {$errorObject.textReadback=@{observedText=$diagnostic.Data['observedText'];expectedLength=$diagnostic.Data['expectedLength'];observedLength=$diagnostic.Data['observedLength']}}
+            if ($diagnostic.Data.Contains('observedText')) {$errorObject.textReadback=@{observedText=$diagnostic.Data['observedText'];expectedLength=$diagnostic.Data['expectedLength'];observedLength=$diagnostic.Data['observedLength'];acknowledgementMs=$diagnostic.Data['acknowledgementMs'];timeoutMs=$diagnostic.Data['timeoutMs']}}
             if ($diagnostic.Data['NoInputSent']) { $dispatched=$false }
         }
         if ($script:CurrentState) { try { Write-PotatoLog -Command $normalized -Level Error -Message $errorObject.message } catch {} }

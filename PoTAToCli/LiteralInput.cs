@@ -114,23 +114,27 @@ public static class PotatoLiteralInput {
         SendText(text,5,GetForegroundWindow().ToInt64(),info.focus.ToInt64());
     }
     public static void SendText(string text, int delayMs, long foregroundHandle, long focusHandle) {
-        SendCore(text,delayMs,foregroundHandle,focusHandle,0,0);
+        SendCore(text,delayMs,foregroundHandle,focusHandle,0,0,3000);
     }
     public static void SendTextAcknowledged(string text,int delayMs,long foregroundHandle,long focusHandle,int process) {
+        SendTextAcknowledged(text,delayMs,foregroundHandle,focusHandle,process,3000);
+    }
+    public static void SendTextAcknowledged(string text,int delayMs,long foregroundHandle,long focusHandle,int process,int timeoutMs) {
+        if (timeoutMs<0 || timeoutMs>60000) throw new ArgumentOutOfRangeException("timeoutMs");
         // Only empty replacement fields have an unambiguous expected prefix.
         // Wait for queued Backspace to be consumed; never repeat clearing/input.
         var timer=Stopwatch.StartNew();
         while (ReadEmptyEditTarget(focusHandle,process).Length!=0) {
-            if (timer.ElapsedMilliseconds>=500) {
+            if (timer.ElapsedMilliseconds>=timeoutMs) {
                 var failure=new InvalidOperationException("Replacement field did not become empty; no text was sent. Inspect it before retrying.");
                 failure.Data["PotatoErrorType"]="TextClearNotReady";failure.Data["NoInputSent"]=true;
                 throw failure;
             }
             Thread.Sleep(2);
         }
-        SendCore(text,delayMs,foregroundHandle,focusHandle,focusHandle,process);
+        SendCore(text,delayMs,foregroundHandle,focusHandle,focusHandle,process,timeoutMs);
     }
-    static void SendCore(string text,int delayMs,long foregroundHandle,long focusHandle,long acknowledgedEdit,int process) {
+    static void SendCore(string text,int delayMs,long foregroundHandle,long focusHandle,long acknowledgedEdit,int process,int timeoutMs) {
         if (delayMs<0 || delayMs>100) throw new ArgumentOutOfRangeException("delayMs");
         for (int i=0;i<text.Length;i++) {
             if (char.IsHighSurrogate(text[i]) && i+1<text.Length && char.IsLowSurrogate(text[i+1])) {i++;continue;}
@@ -175,11 +179,12 @@ public static class PotatoLiteralInput {
                     }
                     actual=ReadEmptyEditTarget(acknowledgedEdit,process);
                     if (PrefixConsumed(acknowledgedEdit,expected,actual)) break;
-                    if (timer.ElapsedMilliseconds>=500) {
+                    if (timer.ElapsedMilliseconds>=timeoutMs) {
                         var failure=new InvalidOperationException("Edit did not consume the typed prefix exactly. Remaining text was stopped; input was not repeated. Inspect actual text rather than assuming path/extension normalization.");
                         failure.Data["PotatoErrorType"]="TextConsumptionFailed";failure.Data["NoInputSent"]=false;
                         failure.Data["observedText"]=actual.Substring(0,Math.Min(192,actual.Length));
                         failure.Data["expectedLength"]=offset;failure.Data["observedLength"]=actual.Length;
+                        failure.Data["acknowledgementMs"]=timer.ElapsedMilliseconds;failure.Data["timeoutMs"]=timeoutMs;
                         throw failure;
                     }
                     // Fast controls usually consume the packet immediately.
