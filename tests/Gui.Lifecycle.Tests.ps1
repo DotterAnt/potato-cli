@@ -64,6 +64,12 @@ $form.Show(); $form.Hide()
     $ticket=$launch.data.ownedWindow | ConvertTo-Json -Compress
     $oldClaim=Invoke-PotatoCliCommand focus @('-ProcessId',"$($child.Id)",'-WindowTitle',$originalTitle,'-SinceCheckpoint',$launch.data.checkpointId,'-TimeoutMs','0') -CliRoot $root -AsObject
     if ($oldClaim.ok) {throw 'Checkpoint claimed a preexisting window.'}
+    if ($oldClaim.outcome -ne 'not-dispatched' -or $oldClaim.error.type -ne 'TargetNotFound' -or $oldClaim.error.message -notmatch 'already present') {throw 'Preexisting-window rejection obscured the checkpoint cause or reported uncertain input.'}
+    $ambiguous=Invoke-PotatoCliCommand focus @('-ProcessId',"$($child.Id)",'-TimeoutMs','0') -CliRoot $root -AsObject
+    if ($ambiguous.ok -or $ambiguous.outcome -ne 'not-dispatched' -or $ambiguous.error.type -ne 'AmbiguousTarget' -or $ambiguous.error.candidates.Count -lt 2) {throw 'Ambiguous focus dispatched input or omitted observed candidates.'}
+    # Diagnostic snapshot includes the new window, but its earlier baseline
+    # must remain usable through serialized state in the next CLI call.
+    Invoke-Fixture windows @('-Checkpoint') | Out-Null
     $claimed=Invoke-Fixture focus @('-ProcessId',"$($child.Id)",'-WindowTitle',$newTitle,'-SinceCheckpoint',$launch.data.checkpointId)
     if ($claimed.data.ownedWindow.nativeWindowHandle -ne $launch.data.ownedWindow.nativeWindowHandle -or $claimed.data.ownedProcessId) {throw 'GUI handoff did not register only its new window.'}
     $stale=$ticket | ConvertFrom-Json
@@ -80,6 +86,16 @@ $form.Show(); $form.Hide()
     $path=Join-Path $root ('long literal [path] +^%{} '+[char]0x151+' image.png')
     $typed=Invoke-Fixture type ($args+@('-Text',$path,'-PathKind','SaveFile','-PreDelete'))
     if (-not $typed.data.verified -or -not $typed.data.verificationPerformed) {throw 'Path typing did not require and pass exact field readback.'}
+    if (-not $typed.data.consumptionAcknowledged) {throw 'Standard Edit path replacement did not acknowledge actual consumption.'}
+    if ($typed.data.inputDelayMs -ne 0) {throw 'Acknowledged standard Edit path retained an unnecessary blind default delay.'}
+    Write-Output ('Acknowledged native path: '+$path.Length+' characters, '+$typed.durationMs+' ms, verified.')
+    $repeatTimes=@()
+    for ($repeat=0;$repeat -lt 3;$repeat++) {
+        $again=Invoke-Fixture type ($args+@('-Text',$path,'-PathKind','SaveFile','-PreDelete'))
+        if (-not $again.data.verified -or -not $again.data.consumptionAcknowledged -or $again.data.inputDelayMs -ne 0) {throw 'Repeated acknowledged replacement lost content or added a blind delay.'}
+        $repeatTimes+=,$again.durationMs
+    }
+    Write-Output ('Repeated verified path replacement ms: '+($repeatTimes -join ', '))
     & $module {
         param($handle,$processId,$expected)
         $element=[pscustomobject]@{Current=@{NativeWindowHandle=[long]$handle;ProcessId=$processId}}

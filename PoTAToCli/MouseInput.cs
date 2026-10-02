@@ -40,6 +40,25 @@ public static class PotatoMouseNative {
     public static void MouseEvent(int flags,int x,int y,int data,int extra) {
         Send(new MouseInput {x=x,y=y,data=(uint)data,flags=(uint)flags,extra=new IntPtr(extra)});
     }
+    public static void Click(bool right,int count) {
+        if (count<1 || count>2) throw new ArgumentOutOfRangeException("count");
+        var inputs=new Input[count*2];
+        for (int i=0;i<count;i++) {
+            inputs[i*2]=new Input {type=0,mouse=new MouseInput {flags=right ? 0x0008u : 0x0002u}};
+            inputs[i*2+1]=new Input {type=0,mouse=new MouseInput {flags=right ? 0x0010u : 0x0004u}};
+        }
+        // Insert the entire click/double-click without shell/UIA gaps between
+        // presses. Queue insertion is not application transition verification.
+        uint sent=SendInput((uint)inputs.Length,inputs,Marshal.SizeOf(typeof(Input)));
+        if (sent!=inputs.Length) {
+            int error=Marshal.GetLastWin32Error();
+            if (sent>0) SendInput(1,new[]{inputs[1]},Marshal.SizeOf(typeof(Input)));
+            var failure=new Win32Exception(error,"Mouse click was incomplete; inspect the desktop before retrying.");
+            failure.Data["PotatoErrorType"]="MouseInputRejected";
+            failure.Data["NoInputSent"]=sent==0;
+            throw failure;
+        }
+    }
     public static void MoveSmooth(int startX,int startY,int endX,int endY,int durationMs) {
         if (durationMs<50 || durationMs>10000) throw new ArgumentOutOfRangeException("durationMs");
         var clock=Stopwatch.StartNew();

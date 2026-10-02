@@ -3,16 +3,28 @@
 function New-PotatoWindowCheckpoint {
     Initialize-PotatoWindowIdentity
     $value=@{id=[guid]::NewGuid().ToString('N');createdAt=(Get-Date).ToString('o');handles=@([PotatoWindowIdentity]::WindowHandles())}
+    # A later diagnostic snapshot must not invalidate the pre-action baseline.
+    # Keep bounded history in state so separate CLI clients can reuse its ID.
+    $history=@($script:CurrentState.windowCheckpoints | Where-Object {$_})
+    if (-not $history.Count -and $script:CurrentState.windowCheckpoint) {$history=@($script:CurrentState.windowCheckpoint)}
+    $history=@($history + $value | Select-Object -Last 16)
     if ($script:CurrentState -is [Collections.IDictionary]) { $script:CurrentState.windowCheckpoint=$value }
     else { $script:CurrentState | Add-Member NoteProperty windowCheckpoint $value -Force }
+    if ($script:CurrentState -is [Collections.IDictionary]) {$script:CurrentState.windowCheckpoints=$history}
+    else {$script:CurrentState | Add-Member NoteProperty windowCheckpoints $history -Force}
     Save-PotatoState $script:CurrentState
     return $value
 }
 
 function Get-PotatoWindowCheckpoint {
     param([string]$Id)
-    $checkpoint=$script:CurrentState.windowCheckpoint
-    if (-not $Id -or -not $checkpoint -or $checkpoint.id -cne $Id) { throw 'SinceCheckpoint must identify the latest windows -Checkpoint receipt. Take it immediately before the GUI action that opens the new window.' }
+    $checkpoint=@($script:CurrentState.windowCheckpoints | Where-Object {$_.id -ceq $Id}) | Select-Object -Last 1
+    if (-not $checkpoint -and $script:CurrentState.windowCheckpoint.id -ceq $Id) {$checkpoint=$script:CurrentState.windowCheckpoint}
+    if (-not $Id -or -not $checkpoint) {
+        $failure=[InvalidOperationException]::new('SinceCheckpoint must identify a retained windows -Checkpoint receipt (last 16). Use the baseline taken before the opening action; a later snapshot cannot prove that an already-open window is new.')
+        $failure.Data['PotatoErrorType']='CheckpointNotFound';$failure.Data['NoInputSent']=$true
+        throw $failure
+    }
     return $checkpoint
 }
 

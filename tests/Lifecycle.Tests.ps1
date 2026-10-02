@@ -12,7 +12,7 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
         @('mshta.exe','javascript:Shell.Run("document");'))) {
         Reject {Get-PotatoInteractionPolicy @{ProcessName=$entry[0];Arguments=$entry[1]} start} 'A GUI launch wrapper was allowed.'
     }
-    Check ((Get-PotatoInteractionPolicy @{ProcessName='filemanager.exe';Arguments='C:\folder'} start).mode -eq 'GuiNavigation') 'Ordinary executable launch was rejected.'
+    Check ((Get-PotatoInteractionPolicy @{ProcessName='filemanager.exe';Arguments='--new-window'} start).mode -eq 'GuiNavigation') 'Ordinary executable launch was rejected.'
     $guard=@{Scope='ForegroundWindow';FallbackReason='Observed dialog';FallbackEvidence='Fixture receipt';TargetMode='Focused';ExpectedFocusJson='{"ClassName":"Edit"}'}
     Check ((Get-PotatoInteractionPolicy $guard type).opaqueTyping) 'Guarded focused input was rejected.'
     Reject {Get-PotatoInteractionPolicy @{Scope='ForegroundWindow';FallbackReason='x';FallbackEvidence='y';TargetMode='Focused'} type} 'External opaque input lacked a focus guard.'
@@ -20,6 +20,17 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     $script:CurrentState=@{working=@{processId=91;nativeWindowHandle=12};windowCheckpoint=@{id='fixture';handles=@(12)}}
     Reject {Get-PotatoWindowCheckpoint 'wrong'} 'Wrong checkpoint accepted.'
     Check ((Get-PotatoWindowCheckpoint 'fixture').handles[0] -eq 12) 'Checkpoint lost its baseline.'
+    function Save-PotatoState {}
+    $script:CurrentState.windowCheckpoints=@(@{id='older';handles=@(9)},$script:CurrentState.windowCheckpoint)
+    Check ((Get-PotatoWindowCheckpoint 'older').handles[0] -eq 9) 'A later diagnostic checkpoint invalidated the pre-action receipt.'
+    $saved=New-PotatoWindowCheckpoint
+    $serializedState=$script:CurrentState | ConvertTo-Json -Depth 6 | ConvertFrom-Json
+    $script:CurrentState=$serializedState
+    Check ((Get-PotatoWindowCheckpoint 'older').handles[0] -eq 9) 'A separate serialized client lost checkpoint history.'
+    for ($i=0;$i -lt 17;$i++) {New-PotatoWindowCheckpoint | Out-Null}
+    Check ($script:CurrentState.windowCheckpoints.Count -eq 16) 'Checkpoint history grew without a bound.'
+    Reject {Get-PotatoWindowCheckpoint 'older'} 'An evicted checkpoint was silently accepted.'
+    $script:CurrentState=@{working=@{processId=91;nativeWindowHandle=12};windowCheckpoint=@{id='fixture';handles=@(12)}}
     function New-PotatoWindowCheckpoint {return $script:CurrentState.windowCheckpoint}
     function Get-Process {param($Name,$Id) [pscustomobject]@{Id=91}}
     function Start-Process {[pscustomobject]@{Id=92;HasExited=$true}}

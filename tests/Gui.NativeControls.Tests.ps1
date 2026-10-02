@@ -23,7 +23,7 @@ public class NativeControlFixture : Form {
     [DllImport("user32.dll")] static extern uint InSendMessageEx(IntPtr reserved);
     public IntPtr Combo;
     public string Output;
-    public NativeControlFixture() { Width=390; Height=240; }
+    public NativeControlFixture() { Width=390; Height=365; }
     protected override bool ProcessDialogKey(Keys key) {
         // This raw HWND has no managed Control wrapper. Let its own window
         // procedure receive arrows instead of WinForms navigating to a button.
@@ -37,6 +37,10 @@ public class NativeControlFixture : Form {
         foreach (string s in new[]{"Alpha choice","Beta choice","Gamma choice"}) SendMessageW(Combo,0x143,IntPtr.Zero,s);
         SendMessageW(Combo,0x14e,IntPtr.Zero,null);
         CreateWindowExW(0,"Button","Native action",0x50010000,175,110,130,30,Handle,new IntPtr(102),IntPtr.Zero,IntPtr.Zero);
+        var edit=CreateWindowExW(0,"Edit","",0x50010080,20,155,290,25,Handle,new IntPtr(104),IntPtr.Zero,IntPtr.Zero);
+        SlowEdit=new DeferredEdit(edit);
+        var completion=CreateWindowExW(0,"Edit","",0x50010080,20,190,290,25,Handle,new IntPtr(105),IntPtr.Zero,IntPtr.Zero);
+        CompletionEdit=new DeferredEdit(completion,true);
     }
     protected override void WndProc(ref Message m) {
         base.WndProc(ref m);
@@ -44,6 +48,36 @@ public class NativeControlFixture : Form {
             System.IO.File.WriteAllText(Output,SendMessageW(Combo,0x147,IntPtr.Zero,null).ToInt64().ToString());
         if (m.Msg==0x111 && (m.WParam.ToInt64() & 0xffff)==102 && ((m.WParam.ToInt64() >> 16) & 0xffff)==0)
             System.IO.File.AppendAllText(Output+".activation",InSendMessageEx(IntPtr.Zero).ToString()+"\n");
+    }
+    public DeferredEdit SlowEdit;
+    public DeferredEdit CompletionEdit;
+}
+// Models an editor which consumes a Unicode scalar asynchronously. Events
+// arriving while its autocomplete work is pending are dropped by this fixture.
+public class DeferredEdit : NativeWindow {
+    Timer timer=new Timer(); bool pending,delivering; IntPtr character;
+    [DllImport("user32.dll")] static extern IntPtr SendMessageW(IntPtr h,uint msg,IntPtr w,IntPtr l);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageW")] static extern IntPtr SendTextMessage(IntPtr h,uint msg,IntPtr w,string text);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h,System.Text.StringBuilder text,int capacity);
+    public DeferredEdit(IntPtr handle,bool complete=false) {
+        AssignHandle(handle);timer.Interval=25;
+        timer.Tick+=(s,e)=>{timer.Stop();delivering=true;try {
+            SendMessageW(Handle,0x102,character,IntPtr.Zero);
+            var value=new System.Text.StringBuilder(256);GetWindowTextW(Handle,value,value.Capacity);
+            if (complete && value.ToString()=="C") {
+                string suggestion="C:\\suggested-path";
+                SendTextMessage(Handle,0xC,IntPtr.Zero,suggestion);
+                SendMessageW(Handle,0xB1,new IntPtr(1),new IntPtr(suggestion.Length));
+            }
+        } finally {delivering=false;pending=false;}};
+    }
+    protected override void WndProc(ref Message message) {
+        if (message.Msg==0x102 && !delivering && message.WParam.ToInt64()>=32) {
+            if (message.WParam.ToInt64()==33) return; // deliberately reject '!'
+            if (!pending) {pending=true;character=message.WParam;timer.Start();}
+            return;
+        }
+        base.WndProc(ref message);
     }
 }
 "@
@@ -64,6 +98,10 @@ $open.Add_Click({
     try {[void]$dialog.ShowDialog($form)} finally {$dialog.Dispose()}
 })
 $form.Controls.Add($open)
+$panel=New-Object Windows.Forms.Panel
+$panel.AccessibleName='Double click target';$panel.SetBounds(20,225,280,45);$panel.BackColor=[Drawing.Color]::LightBlue
+$panel.Add_MouseDoubleClick({[IO.File]::AppendAllText($Output+'.double','double-click'+[Environment]::NewLine)})
+$form.Controls.Add($panel)
 $form.Show();$form.Hide()
 [void]$form.ShowDialog()
 '@ | Set-Content -LiteralPath $fixture -Encoding UTF8
@@ -85,6 +123,24 @@ $form.Show();$form.Hide()
         return $false
     }
     Invoke-Fixture focus @('-ProcessId',"$($child.Id)",'-WindowTitle',$title,'-TimeoutMs','10000') | Out-Null
+    $double=Invoke-Fixture click @('-Name','Double click target','-ClickCount','2')
+    $watch=[Diagnostics.Stopwatch]::StartNew()
+    while (-not [IO.File]::Exists($output+'.double') -and $watch.ElapsedMilliseconds -lt 2000) {Start-Sleep -Milliseconds 20}
+    Check ($double.data.action -eq 'Mouse' -and $double.data.clickCount -eq 2 -and [IO.File]::ReadAllLines($output+'.double').Count -eq 1) 'Atomic double-click did not produce exactly one actual double-click event.'
+    $text='C:\fixture\PhotosTest.pdf'
+    $unpaced=Invoke-PotatoCliCommand type @('-AutomationId','104','-Text',$text,'-Verify','-VerifyTimeoutMs','150','-InputDelayMs','5') -CliRoot $root -AsObject
+    Check (-not $unpaced.ok -and $unpaced.error.type -eq 'VerificationFailed') 'Slow Edit fixture failed to reproduce loss with queued typing.'
+    $typed=Invoke-Fixture type @('-AutomationId','104','-Text',$text,'-PreDelete','-Verify','-InputDelayMs','5')
+    Check ($typed.data.verified -and $typed.data.consumptionAcknowledged) 'Acknowledged typing lost characters in an asynchronous standard Edit.'
+    $read=Invoke-Fixture read @('-AutomationId','104')
+    Check ($read.data.text -ceq $text) 'Actual asynchronous Edit content differs from the requested text.'
+    $completed=Invoke-Fixture type @('-AutomationId','105','-Text',$text,'-PreDelete','-Verify')
+    Check ($completed.data.verified -and $completed.data.consumptionAcknowledged -and (Invoke-Fixture read @('-AutomationId','105')).data.text -ceq $text) 'Selected autocomplete suffix blocked typing or substituted for final exact readback.'
+    $rejected=Invoke-PotatoCliCommand type @('-AutomationId','104','-Text','start!tail','-PreDelete','-Verify','-InputDelayMs','5') -CliRoot $root -AsObject
+    Check (-not $rejected.ok -and $rejected.error.type -eq 'TextConsumptionFailed' -and $rejected.outcome -eq 'unknown') 'Lost text was repeated or treated as no-input/success.'
+    $read=Invoke-Fixture read @('-AutomationId','104')
+    Check ($read.data.text -ceq 'start' -and $rejected.error.textReadback.observedText -ceq 'start' -and $rejected.error.textReadback.expectedLength -eq 6) 'Typing sent the suffix after a rejected scalar or omitted actual readback diagnostics.'
+    Write-Output ('Acknowledged slow Edit: '+$text.Length+' characters, '+$typed.durationMs+' ms, actual exact readback; rejected scalar stopped remaining text.')
     # A native action can make COM calls in its handler, as file dialogs do.
     # Verify Auto avoids a cross-thread synchronous message, without simulating
     # a successful save or relying on any application-specific button name.

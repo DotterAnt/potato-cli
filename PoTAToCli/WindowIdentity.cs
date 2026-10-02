@@ -46,6 +46,7 @@ public static class PotatoWindowIdentity {
             throw new InvalidOperationException("Edit readback timed out.");
         return text.ToString();
     }
+    public static bool IsMultilineEdit(IntPtr window) {return (GetWindowLongW(window,-16) & 0x4)!=0;}
     public static void SelectEditText(IntPtr window,int processId) {
         if (!IsStandardEdit(window,processId,true)) throw new InvalidOperationException("Not a writable standard Edit control.");
         IntPtr result;

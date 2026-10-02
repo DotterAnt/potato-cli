@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Text;
+using System.Diagnostics;
 
 // Unicode keyboard events, never clipboard or application object-model writes.
 public static class PotatoLiteralInput {
@@ -28,6 +30,37 @@ public static class PotatoLiteralInput {
         public Rect caretRect;
     }
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window,out uint process);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr window,StringBuilder text,int capacity);
+    [DllImport("user32.dll")] static extern int GetWindowLongW(IntPtr window,int index);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern IntPtr SendMessageTimeoutW(IntPtr window,uint message,IntPtr wParam,StringBuilder text,uint flags,uint timeout,out IntPtr result);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageTimeoutW")] static extern IntPtr ReadEditLength(IntPtr window,uint message,IntPtr wParam,IntPtr lParam,uint flags,uint timeout,out IntPtr result);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode,EntryPoint="SendMessageTimeoutW")] static extern IntPtr ReadEditSelection(IntPtr window,uint message,out uint start,out uint end,uint flags,uint timeout,out IntPtr result);
+    static bool PrefixConsumed(long handle,string expected,string actual) {
+        if (String.Equals(expected,actual,StringComparison.Ordinal)) return true;
+        // Shell/edit autocomplete can append a selected suggestion. The next
+        // character replaces that selection; an unselected extra suffix is not
+        // accepted as consumption. Final full-field verification stays exact.
+        if (!actual.StartsWith(expected,StringComparison.Ordinal)) return false;
+        uint start,end;IntPtr result;
+        return ReadEditSelection(new IntPtr(handle),0xB0,out start,out end,2,500,out result)!=IntPtr.Zero &&
+            start==expected.Length && end==actual.Length;
+    }
+    static string ReadEmptyEditTarget(long handle,int process) {
+        var window=new IntPtr(handle); uint actualProcess;
+        GetWindowThreadProcessId(window,out actualProcess);
+        var name=new StringBuilder(256);GetClassNameW(window,name,name.Capacity);
+        if (actualProcess!=(uint)process || !String.Equals(name.ToString(),"Edit",StringComparison.OrdinalIgnoreCase) ||
+            (GetWindowLongW(window,-16) & (0x20|0x800|0x4))!=0)
+            throw new InvalidOperationException("Acknowledged typing requires a readable single-line standard Edit.");
+        IntPtr length;
+        if (ReadEditLength(window,0xE,IntPtr.Zero,IntPtr.Zero,2,500,out length)==IntPtr.Zero || length.ToInt64()<0 || length.ToInt64()>65536)
+            throw new InvalidOperationException("Edit acknowledgement length is unavailable or exceeds its bound.");
+        var text=new StringBuilder((int)length+1);IntPtr read;
+        if (SendMessageTimeoutW(window,0x000D,new IntPtr(text.Capacity),text,2,500,out read)==IntPtr.Zero)
+            throw new InvalidOperationException("Edit acknowledgement timed out.");
+        return text.ToString();
+    }
 
     static Input Key(char value, bool up) {
         bool control = value == '\n' || value == '\t';
@@ -81,6 +114,23 @@ public static class PotatoLiteralInput {
         SendText(text,5,GetForegroundWindow().ToInt64(),info.focus.ToInt64());
     }
     public static void SendText(string text, int delayMs, long foregroundHandle, long focusHandle) {
+        SendCore(text,delayMs,foregroundHandle,focusHandle,0,0);
+    }
+    public static void SendTextAcknowledged(string text,int delayMs,long foregroundHandle,long focusHandle,int process) {
+        // Only empty replacement fields have an unambiguous expected prefix.
+        // Wait for queued Backspace to be consumed; never repeat clearing/input.
+        var timer=Stopwatch.StartNew();
+        while (ReadEmptyEditTarget(focusHandle,process).Length!=0) {
+            if (timer.ElapsedMilliseconds>=500) {
+                var failure=new InvalidOperationException("Replacement field did not become empty; no text was sent. Inspect it before retrying.");
+                failure.Data["PotatoErrorType"]="TextClearNotReady";failure.Data["NoInputSent"]=true;
+                throw failure;
+            }
+            Thread.Sleep(2);
+        }
+        SendCore(text,delayMs,foregroundHandle,focusHandle,focusHandle,process);
+    }
+    static void SendCore(string text,int delayMs,long foregroundHandle,long focusHandle,long acknowledgedEdit,int process) {
         if (delayMs<0 || delayMs>100) throw new ArgumentOutOfRangeException("delayMs");
         for (int i=0;i<text.Length;i++) {
             if (char.IsHighSurrogate(text[i]) && i+1<text.Length && char.IsLowSurrogate(text[i+1])) {i++;continue;}
@@ -102,7 +152,7 @@ public static class PotatoLiteralInput {
             }
             // Deliver one Unicode scalar per paced call. A successful SendInput
             // reports queue insertion, not that the editor consumed the text.
-            int length=delayMs==0 ? Math.Min(128,text.Length-offset) :
+            int length=delayMs==0 && acknowledgedEdit==0 ? Math.Min(128,text.Length-offset) :
                 (char.IsHighSurrogate(text[offset]) && offset+1<text.Length && char.IsLowSurrogate(text[offset+1]) ? 2 : 1);
             if (length>1 && offset+length<text.Length && char.IsHighSurrogate(text[offset+length-1])) length--;
             var inputs=new Input[length*2];
@@ -115,6 +165,30 @@ public static class PotatoLiteralInput {
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Text input was incomplete; observe the field before retrying.");
             offset+=length;
             if (delayMs>0) Thread.Sleep(delayMs);
+            if (acknowledgedEdit!=0) {
+                string expected=text.Substring(0,offset),actual="";
+                var timer=Stopwatch.StartNew();
+                do {
+                    if (GetForegroundWindow().ToInt64()!=foregroundHandle || !GetGUIThreadInfo(0,ref info) || info.focus.ToInt64()!=focusHandle) {
+                        var changed=new InvalidOperationException("Keyboard target changed while acknowledging text. Inspect content before retrying.");
+                        changed.Data["PotatoErrorType"]="InputFocusChanged";changed.Data["NoInputSent"]=false;throw changed;
+                    }
+                    actual=ReadEmptyEditTarget(acknowledgedEdit,process);
+                    if (PrefixConsumed(acknowledgedEdit,expected,actual)) break;
+                    if (timer.ElapsedMilliseconds>=500) {
+                        var failure=new InvalidOperationException("Edit did not consume the typed prefix exactly. Remaining text was stopped; input was not repeated. Inspect actual text rather than assuming path/extension normalization.");
+                        failure.Data["PotatoErrorType"]="TextConsumptionFailed";failure.Data["NoInputSent"]=false;
+                        failure.Data["observedText"]=actual.Substring(0,Math.Min(192,actual.Length));
+                        failure.Data["expectedLength"]=offset;failure.Data["observedLength"]=actual.Length;
+                        throw failure;
+                    }
+                    // Fast controls usually consume the packet immediately.
+                    // Yield briefly before falling back to a scheduler sleep;
+                    // a blind 1..5 ms sleep can round to an entire Windows tick.
+                    if (delayMs==0 && timer.ElapsedMilliseconds<2) Thread.Yield();
+                    else Thread.Sleep(1);
+                } while (true);
+            }
         }
     }
 }

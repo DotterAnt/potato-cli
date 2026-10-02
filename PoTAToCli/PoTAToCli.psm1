@@ -1077,7 +1077,8 @@ function Invoke-PotatoFocus {
     if ($checkpoint) {
         $watch=[Diagnostics.Stopwatch]::StartNew()
         do {
-            $windows=@(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs 0 | Where-Object {$checkpoint.handles -notcontains [long]$_.Current.NativeWindowHandle})
+            $allMatches=@(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs 0)
+            $windows=@($allMatches | Where-Object {$checkpoint.handles -notcontains [long]$_.Current.NativeWindowHandle})
             if ($windows.Count -or $watch.ElapsedMilliseconds -ge $timeoutMs) {break}
             Start-Sleep -Milliseconds 100
         } while ($true)
@@ -1086,14 +1087,22 @@ function Invoke-PotatoFocus {
     }
     if ($processId -gt 0) { $windows = @($windows | Where-Object { $_.Current.ProcessId -eq $processId }) }
     $window = $windows | Select-Object -First 1
-    if (-not $window) { throw 'No matching top-level window was found.' }
-    if ($windows.Count -gt 1) { throw 'More than one top-level window matches. Narrow the observed selector or use WindowIdentityJson.' }
+    if (-not $window -or $windows.Count -gt 1) {
+        $message=if (-not $window) {'No matching top-level window was found.'} else {'More than one top-level window matches. Narrow the observed selector or use WindowIdentityJson.'}
+        if (-not $window -and $checkpoint -and $allMatches.Count) {$message+=' Matching windows were already present in that checkpoint; they cannot be claimed as new. Preserve them, or deliberately use plain focus without cleanup ownership. Do not pre-close all application windows.'}
+        $failure=[InvalidOperationException]::new($message)
+        $failure.Data['PotatoErrorType']=if ($window) {'AmbiguousTarget'} else {'TargetNotFound'}
+        $failure.Data['NoInputSent']=$true
+        if ($windows.Count -gt 1) {$failure.Data['candidates']=@($windows | ForEach-Object {ConvertTo-PotatoElementInfo $_})}
+        throw $failure
+    }
 
     $working = Set-PotatoWorkingWindow -Element $window
     $working['windowScoped']=$true
     Save-PotatoState $script:CurrentState
     [void](Show-PotatoWindow -Handle $working.nativeWindowHandle -Maximize:$maximize)
-    [ordered]@{ working = $working; ownedWindow=$(if ($checkpoint) {New-PotatoOwnedWindow $working} else {$null}) }
+    [ordered]@{ working = $working; ownedWindow=$(if ($checkpoint) {New-PotatoOwnedWindow $working} else {$null});
+        ownershipNote=$(if (-not $checkpoint) {'Plain focus grants no cleanup ownership. For a new GUI handoff use its pre-action checkpoint; intentionally reused windows must be preserved.'}) }
 }
 
 function Invoke-PotatoWindows {
@@ -1386,21 +1395,15 @@ function Invoke-PotatoMouseClick {
     [CmdletBinding()]
     param(
         [ValidateSet('Left', 'Right')]
-        [string] $Button = 'Left'
+        [string] $Button = 'Left',
+        [ValidateRange(1,2)] [int] $ClickCount = 1
     )
 
     if (-not (Initialize-PotatoNativeMouse)) {
         throw 'Native mouse input is not available in this PowerShell session.'
     }
 
-    if ($Button -eq 'Right') {
-        [PotatoMouseNative]::MouseEvent(0x0008, 0, 0, 0, 0)
-        [PotatoMouseNative]::MouseEvent(0x0010, 0, 0, 0, 0)
-    }
-    else {
-        [PotatoMouseNative]::MouseEvent(0x0002, 0, 0, 0, 0)
-        [PotatoMouseNative]::MouseEvent(0x0004, 0, 0, 0, 0)
-    }
+    [PotatoMouseNative]::Click(($Button -eq 'Right'),$ClickCount)
 }
 
 function Invoke-PotatoElementDefaultAction {
@@ -1502,6 +1505,9 @@ function Invoke-PotatoClick {
         [hashtable] $ArgsMap
     )
 
+    $clickCount=0
+    if (-not [int]::TryParse([string](Get-PotatoArg $ArgsMap @('ClickCount') 1),[ref]$clickCount) -or $clickCount -notin @(1,2)) {throw 'ClickCount must be 1 or 2.'}
+    if ($clickCount -eq 2 -and (Get-PotatoArg $ArgsMap @('Method')) -eq 'Invoke') {throw 'Double-click requires Mouse or Auto, not Invoke.'}
     if (-not $ArgsMap.ContainsKey('RequireUnique')) { $ArgsMap.RequireUnique=$true }
     $target = Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
     if (-not $target.ok) {
@@ -1556,7 +1562,7 @@ function Invoke-PotatoClick {
         $invokePattern.Invoke()
         $action = 'InvokePattern'
     }
-    elseif ($method -eq 'Auto' -and -not $nativeButton -and $button -eq 'Left' -and $offsetX -eq 0 -and $offsetY -eq 0 -and -not $center -and -not $relative) {
+    elseif ($clickCount -eq 1 -and $method -eq 'Auto' -and -not $nativeButton -and $button -eq 'Left' -and $offsetX -eq 0 -and $offsetY -eq 0 -and -not $center -and -not $relative) {
         $action = Invoke-PotatoElementDefaultAction -Element $target.element
     }
     $point = $null
@@ -1583,7 +1589,7 @@ function Invoke-PotatoClick {
         else { $point = Get-PotatoClickPoint -Element $target.element -Center $center -OffsetX $offsetX -OffsetY $offsetY -OffsetClickablePoint $offsetClickablePoint }
         if ((Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') { Assert-PotatoGuardedTarget $target.element $ArgsMap }
         Move-PotatoMouse -X $point.x -Y $point.y
-        Invoke-PotatoMouseClick -Button $button
+        Invoke-PotatoMouseClick -Button $button -ClickCount $clickCount
         $action = 'Mouse'
     }
 
@@ -1603,6 +1609,7 @@ function Invoke-PotatoClick {
         verified = $verified
         verificationPerformed = $verifyDisappeared
         action = $action
+        clickCount = $clickCount
         point = $point
         element = $elementInfo
     }
@@ -1619,19 +1626,13 @@ function Invoke-PotatoClickCoordinate {
     $y = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Y', 'y')) ([int]::MinValue)
     if ($x -eq [int]::MinValue -or $y -eq [int]::MinValue) { throw 'click-coordinate requires -X and -Y.' }
     $button = Get-PotatoArg -ArgsMap $ArgsMap -Names @('Button') -Default 'Left'
+    $clickCount=0
+    if (-not [int]::TryParse([string](Get-PotatoArg $ArgsMap @('ClickCount') 1),[ref]$clickCount) -or $clickCount -notin @(1,2) -or $button -notin @('Left','Right')) {throw 'ClickCount must be 1 or 2 and Button must be Left or Right.'}
     Move-PotatoMouse -X $x -Y $y
     $action = 'Mouse'
-    try {
-        Invoke-PotatoMouseClick -Button $button
-    }
-    catch {
-        if ($button -ne 'Left') { throw }
-        $point = New-Object System.Windows.Point($x, $y)
-        $element = [System.Windows.Automation.AutomationElement]::FromPoint($point)
-        $action = Invoke-PotatoElementDefaultAction -Element $element
-        if (-not $action) { throw }
-    }
-    [ordered]@{ clicked = $true; point = [ordered]@{ x = $x; y = $y }; button = $button; action = $action }
+    # Never fall through to a different action after partial native insertion.
+    Invoke-PotatoMouseClick -Button $button -ClickCount $clickCount
+    [ordered]@{ clicked = $true; point = [ordered]@{ x = $x; y = $y }; button = $button; action = $action;clickCount=$clickCount }
 }
 
 function ConvertTo-PotatoLiteralKeys {
@@ -1804,7 +1805,26 @@ function Invoke-PotatoType {
         $failure.Data['NoInputSent']=-not $clearInputSent
         throw $failure
     }
-    [PotatoLiteralInput]::SendText([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle)
+    $acknowledged=$verify -and $verifyMode -eq 'Exact' -and $preDelete -and
+        [long]$targetInfo.nativeWindowHandle -eq [long]$native.focusHandle -and
+        [PotatoWindowIdentity]::IsStandardEdit([IntPtr][long]$native.focusHandle,[int]$targetInfo.processId,$true) -and
+        ([string]$text).Length -le 65536 -and ([string]$text).IndexOfAny([char[]]@("`r","`n","`t")) -lt 0
+    # Single-line replacement fields can acknowledge consumption between scalars.
+    # Other editors retain the tested pacing/final verification path.
+    if ($acknowledged -and -not [PotatoWindowIdentity]::IsMultilineEdit([IntPtr][long]$native.focusHandle)) {
+        # Readback provides pacing on this path. Honor explicit/legacy delays,
+        # but don't sleep blindly when an ordinary Edit already consumed input.
+        if (-not $ArgsMap.ContainsKey('InputDelayMs') -and -not $typeByCharacter) {$inputDelayMs=0}
+        try {[PotatoLiteralInput]::SendTextAcknowledged([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle,[int]$targetInfo.processId)}
+        catch {
+            $diagnostic=$_.Exception;while ($diagnostic.InnerException) {$diagnostic=$diagnostic.InnerException}
+            if ($clearInputSent) {$diagnostic.Data['NoInputSent']=$false}
+            throw
+        }
+    } else {
+        $acknowledged=$false
+        [PotatoLiteralInput]::SendText([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle)
+    }
     $typedOk = $null
     $verification = $null
     if ($verify) {
@@ -1815,7 +1835,7 @@ function Invoke-PotatoType {
     $script:CurrentState.lastAction = [ordered]@{ command = 'type'; ok = ($typedOk -ne $false); timestamp = (Get-Date).ToString('o') }
     Save-PotatoState -State $script:CurrentState
 
-    [ordered]@{ typed = $true; textLength = ([string]$text).Length; verified = $typedOk; verificationPerformed = $verify; verification = $verification; inputMethod = 'UnicodeKeyboard'; inputDelayMs=$inputDelayMs; focusMethod = $usedFocusMethod; targetMode=$targetMode; target=$targetInfo;
+    [ordered]@{ typed = $true; textLength = ([string]$text).Length; verified = $typedOk; verificationPerformed = $verify; verification = $verification; inputMethod = 'UnicodeKeyboard'; inputDelayMs=$inputDelayMs; consumptionAcknowledged=$acknowledged; focusMethod = $usedFocusMethod; targetMode=$targetMode; target=$targetInfo;
         inputFocus=$(if ($inputFocus) {@{source=$inputFocus.source;native=$inputFocus.native;waitMs=$inputFocus.waitMs}}); clearMethod = $(if ($preDelete) { $clearMethod } else { $null }) }
 }
 
@@ -2434,6 +2454,7 @@ function Invoke-PotatoCliCommandCore {
             $errorObject.candidates=$diagnostic.Data['candidates']
             if ($diagnostic.Data['focus']) { $errorObject.focus=$diagnostic.Data['focus'] }
             if ($diagnostic.Data['blockingDialog']) { $errorObject.blockingDialog=$diagnostic.Data['blockingDialog'] }
+            if ($diagnostic.Data.Contains('observedText')) {$errorObject.textReadback=@{observedText=$diagnostic.Data['observedText'];expectedLength=$diagnostic.Data['expectedLength'];observedLength=$diagnostic.Data['observedLength']}}
             if ($diagnostic.Data['NoInputSent']) { $dispatched=$false }
         }
         if ($script:CurrentState) { try { Write-PotatoLog -Command $normalized -Level Error -Message $errorObject.message } catch {} }

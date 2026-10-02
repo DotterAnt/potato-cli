@@ -7,6 +7,9 @@ $module = Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -
     function Check($ok,$message) { if (-not $ok) { throw $message }; $script:checks++ }
     function Reject([scriptblock]$body,$message) { $thrown=$false; try { & $body | Out-Null } catch {$thrown=$true}; Check $thrown $message }
     Initialize-PotatoAutomationTypes
+    Reject {Invoke-PotatoClick @{ClickCount='two'}} 'Invalid double-click count dispatched a default single click.'
+    Reject {Invoke-PotatoClickCoordinate @{X=0;Y=0;ClickCount='two'}} 'Invalid coordinate double-click count moved or clicked the pointer.'
+    Reject {Invoke-PotatoClick @{ClickCount=2;Method='Invoke'}} 'Double-click attempted an Invoke action.'
     Add-Type -AssemblyName WindowsBase
     Check ($null -eq (ConvertTo-PotatoRectangle ([Windows.Rect]::Empty))) 'Empty bounds must not throw.'
     foreach ($value in @([double]::NaN,[double]::PositiveInfinity,[double]::NegativeInfinity,1e30)) {

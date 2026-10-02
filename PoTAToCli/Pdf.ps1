@@ -265,6 +265,6 @@ function Read-PotatoPdfText {
         $pageTexts.Add($text.ToString().Trim())
     }
     $result = ($pageTexts -join ([Environment]::NewLine + [Environment]::NewLine)).Trim()
-    if (-not $result) { throw 'No extractable PDF text found. Scanned/image-only PDFs require OCR, which is not supported.' }
+    if (-not $result) { throw 'No extractable PDF text found. For image/layout expectations, render this existing PDF and inspect/assert its pixels; OCR is needed only for text extraction and is not supported here. A PDF header is not content verification.' }
     return $result
 }
