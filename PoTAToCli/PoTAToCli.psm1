@@ -1435,6 +1435,17 @@ function Invoke-PotatoElementDefaultAction {
 
     # Fall back only when a pattern is absent. If an action throws after the
     # provider received it, another pattern or mouse click could double-act.
+    # A submenu may expose Invoke as well as ExpandCollapse. Its default GUI
+    # route is to open the submenu, not invoke the provider's alternate action.
+    $pattern=$null
+    if ((Get-PotatoControlTypeName $Element) -eq 'MenuItem' -and
+        $Element.TryGetCurrentPattern([System.Windows.Automation.ExpandCollapsePattern]::Pattern,[ref]$pattern)) {
+        $state=$pattern.Current.ExpandCollapseState
+        if ($state -ne [System.Windows.Automation.ExpandCollapseState]::LeafNode) {
+            if ($state -ne [System.Windows.Automation.ExpandCollapseState]::Expanded) {$pattern.Expand()}
+            return 'ExpandCollapsePattern'
+        }
+    }
     $pattern = $null
     if ($Element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
         $pattern.Invoke()
@@ -2114,20 +2125,23 @@ function New-PotatoScreenshot {
         [string] $OutFile,
         [ValidateSet('PNG', 'JPEG', 'BMP', 'GIF', 'TIFF')]
         [string] $EncoderType = 'PNG',
-        [int] $Quality = 80
+        [int] $Quality = 80,
+        [System.Drawing.Bitmap] $CapturedBitmap
     )
 
     $OutFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutFile)
     $parent = Split-Path -Parent $OutFile
     if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-    $bitmap = New-Object System.Drawing.Bitmap($Width, $Height)
+    $bitmap = if ($CapturedBitmap) {$CapturedBitmap} else {New-Object System.Drawing.Bitmap($Width, $Height)}
     $graphics = $null
     $encoderParams = $null
     try {
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $methodName = 'Copy' + 'FromScreen'
-    $copyMethod = $graphics.GetType().GetMethod($methodName, [type[]]@([int], [int], [int], [int], [System.Drawing.Size]))
-    [void]$copyMethod.Invoke($graphics, @($X, $Y, 0, 0, $bitmap.Size))
+    if (-not $CapturedBitmap) {
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $methodName = 'Copy' + 'FromScreen'
+        $copyMethod = $graphics.GetType().GetMethod($methodName, [type[]]@([int], [int], [int], [int], [System.Drawing.Size]))
+        [void]$copyMethod.Invoke($graphics, @($X, $Y, 0, 0, $bitmap.Size))
+    }
     $encoderTypeLower = $EncoderType.ToLower()
     $mime = "image/$encoderTypeLower"
     if ($encoderType -eq 'JPEG') { $mime = 'image/jpeg' }
@@ -2140,7 +2154,7 @@ function New-PotatoScreenshot {
     } finally {
         if ($encoderParams) { $encoderParams.Dispose() }
         if ($graphics) { $graphics.Dispose() }
-        $bitmap.Dispose()
+        if (-not $CapturedBitmap) {$bitmap.Dispose()}
     }
 }
 
@@ -2183,10 +2197,42 @@ function Invoke-PotatoScreenshot {
     }
 
     if (-not $region -or $region.width -le 0 -or $region.height -le 0) { throw 'Screenshot target has no usable bounds.' }
-    New-PotatoScreenshot -X $region.x -Y $region.y -Width $region.width -Height $region.height -OutFile $outFile -EncoderType $encoder -Quality $quality
-    [ordered]@{ path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($outFile); region = $region; format = $encoder;
+    $reference=Get-PotatoArg $ArgsMap @('WaitForChangeFrom')
+    $visualWait=$null;$frame=$null
+    try {
+        if ($reference) {
+            $comparison=ConvertFrom-PotatoJsonArgument (Get-PotatoArg $ArgsMap @('ChangeRegionJson'))
+            if (-not $comparison) {throw 'WaitForChangeFrom requires an observed ChangeRegionJson in screenshot image pixels; exclude hover/focus indicators and unrelated animation.'}
+            foreach ($key in @('x','y','width','height')) {
+                if ($null -eq $comparison.$key -or [string]$comparison.$key -notmatch '^\d+$' -or [decimal]$comparison.$key -gt [int]::MaxValue) {throw 'ChangeRegionJson needs nonnegative integer x,y,width,height.'}
+            }
+            $timeout=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('TimeoutMs')) 2000
+            $stable=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('StableMs')) ([Math]::Min(150,$timeout))
+            if (-not ('PotatoVisualCapture' -as [type])) {
+                $references=if ($PSVersionTable.PSVersion.Major -ge 6) {
+                    @([Drawing.Bitmap].Assembly.Location,[Drawing.Rectangle].Assembly.Location,'System.Runtime.dll','System.Runtime.Extensions.dll','System.Threading.Thread.dll','System.IO.FileSystem.dll','System.Diagnostics.TraceSource.dll')
+                } else {@('System.Drawing','System')}
+                # .NET 10 moved public Drawing interfaces into Windows support
+                # assemblies; older hosts do not have those dependencies.
+                if ($PSVersionTable.PSVersion.Major -ge 6) {
+                    $references+=@([Drawing.Bitmap].Assembly.GetReferencedAssemblies() | Where-Object {$_.Name -like 'System.Private.Windows.*'} | ForEach-Object {[Reflection.Assembly]::Load($_).Location})
+                }
+                Add-Type -Path (Join-Path $PSScriptRoot 'VisualCapture.cs') -ReferencedAssemblies $references
+            }
+            $reference=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($reference)
+            if ($reference -eq $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($outFile)) {throw 'Visual wait output must differ from its reference path; preserve the before-action evidence.'}
+            $screen=[Drawing.Rectangle]::new($region.x,$region.y,$region.width,$region.height)
+            $area=[Drawing.Rectangle]::new($comparison.x,$comparison.y,$comparison.width,$comparison.height)
+            $frame=[PotatoVisualCapture]::Wait($reference,$screen,$area,$timeout,$stable)
+            $visualWait=[ordered]@{conditionMet=$frame.ConditionMet;changed=$frame.Changed;elapsedMs=$frame.ElapsedMs;samples=$frame.Samples;stableMs=$stable;comparisonRegion=$comparison}
+        } elseif ($ArgsMap.ContainsKey('ChangeRegionJson') -or $ArgsMap.ContainsKey('StableMs')) {throw 'ChangeRegionJson/StableMs require WaitForChangeFrom.'}
+        New-PotatoScreenshot -X $region.x -Y $region.y -Width $region.width -Height $region.height -OutFile $outFile -EncoderType $encoder -Quality $quality -CapturedBitmap $(if ($frame) {$frame.Bitmap} else {$null})
+    } finally {if ($frame) {$frame.Dispose()}}
+    $result=[ordered]@{ path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($outFile); region = $region; format = $encoder;
         coordinateSpace='PhysicalScreenPixels'; imageWidth=$region.width; imageHeight=$region.height;
         hint='Image pixels map to physical screen pixels plus region.x/y. Inspect the image before choosing a fallback point; do not use coordinates from a scaled preview.' }
+    if ($visualWait) {$result.visualWait=$visualWait;$result.conditionMet=$visualWait.conditionMet;$result.hint+=' Visual change/stability is a readiness check, not proof of the expected content. If unmet, inspect the final frame without repeating input.'}
+    return $result
 }
 
 function Invoke-PotatoCloseWindow {

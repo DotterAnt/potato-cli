@@ -52,6 +52,26 @@ $module = Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -
     Check (Get-PotatoInteractionPolicy $opaque type).opaqueTyping 'Opaque input was not recorded.'
     Reject { Invoke-PotatoPressKey @{Key='F4'} } 'Application key was accepted as navigation.'
     Reject { Invoke-PotatoPressKey @{Key='Enter';Count=2} } 'Repeated submission was accepted.'
+    $script:expanded=0;$script:invoked=0
+    $expand=[pscustomobject]@{Current=@{ExpandCollapseState=[Windows.Automation.ExpandCollapseState]::Collapsed}}
+    $expand | Add-Member ScriptMethod Expand {$script:expanded++}
+    $invoke=[pscustomobject]@{}
+    $invoke | Add-Member ScriptMethod Invoke {$script:invoked++}
+    $submenu=[pscustomobject]@{Current=@{ControlType=[Windows.Automation.ControlType]::MenuItem};expand=$expand;invoke=$invoke}
+    $submenu | Add-Member ScriptMethod TryGetCurrentPattern {param($id,$value)
+        if ($id -eq [Windows.Automation.ExpandCollapsePattern]::Pattern) {$value.Value=$this.expand;return $true}
+        if ($id -eq [Windows.Automation.InvokePattern]::Pattern) {$value.Value=$this.invoke;return $true}
+        return $false
+    }
+    Check ((Invoke-PotatoElementDefaultAction $submenu) -eq 'ExpandCollapsePattern' -and $script:expanded -eq 1 -and $script:invoked -eq 0) 'Auto invoked a submenu instead of expanding it.'
+    $expand.Current.ExpandCollapseState=[Windows.Automation.ExpandCollapseState]::Expanded
+    Check ((Invoke-PotatoElementDefaultAction $submenu) -eq 'ExpandCollapsePattern' -and $script:expanded -eq 1 -and $script:invoked -eq 0) 'Auto closed an already expanded submenu.'
+    $expand.Current.ExpandCollapseState=[Windows.Automation.ExpandCollapseState]::LeafNode
+    Check ((Invoke-PotatoElementDefaultAction $submenu) -eq 'InvokePattern' -and $script:invoked -eq 1) 'A leaf menu command did not retain Invoke.'
+    $expand.Current.ExpandCollapseState=[Windows.Automation.ExpandCollapseState]::Collapsed
+    $expand | Add-Member ScriptMethod Expand {throw 'Provider received expansion but failed'} -Force
+    Reject {Invoke-PotatoElementDefaultAction $submenu} 'A failed expansion was hidden by a second action.'
+    Check ($script:invoked -eq 1) 'A failed expansion fell through and invoked another action.'
     $script:CurrentState = [pscustomobject]@{working=@{processId=$PID}}
     $field = [pscustomobject]@{Current=[pscustomobject]@{IsEnabled=$true;HasKeyboardFocus=$true;ProcessId=$PID;ControlType=[Windows.Automation.ControlType]::Edit}}
     $field | Add-Member ScriptMethod TryGetCurrentPattern { param($id,$value) $value.Value=[pscustomobject]@{Current=@{IsReadOnly=$false}}; return $true }
