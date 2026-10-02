@@ -25,6 +25,13 @@ public static class PotatoWindowIdentity {
         return !String.IsNullOrEmpty(token) && GetPropW(window,"PoTATo.Window."+token)==new IntPtr(1);
     }
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr window, StringBuilder text, int length);
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr window, StringBuilder text, int length);
+    public static string ClassName(IntPtr window) {
+        var text=new StringBuilder(256); GetClassNameW(window,text,text.Capacity); return text.ToString();
+    }
+    public static string Title(IntPtr window) {
+        var text=new StringBuilder(4096); GetWindowTextW(window,text,text.Capacity); return text.ToString();
+    }
     [DllImport("user32.dll")] static extern int GetWindowLongW(IntPtr window, int index);
     [DllImport("user32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr window,uint message,IntPtr wParam,StringBuilder text,uint flags,uint timeout,out IntPtr result);
     [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SendMessageTimeoutW(IntPtr window,uint message,IntPtr wParam,IntPtr lParam,uint flags,uint timeout,out IntPtr result);

@@ -24,6 +24,13 @@ $form.Add_Shown({[IO.File]::WriteAllText((Join-Path $Root 'ready'),'ready')})
 $timer=New-Object Windows.Forms.Timer
 $timer.Interval=50
 $timer.Add_Tick({
+    if (Test-Path (Join-Path $Root 'duplicate')) {
+        Remove-Item -LiteralPath (Join-Path $Root 'duplicate')
+        $script:duplicate=New-Object Windows.Forms.Form
+        $script:duplicate.Text=$script:shared.Text;$script:duplicate.Width=450;$script:duplicate.Height=220
+        $script:duplicate.Show()
+        [IO.File]::WriteAllText((Join-Path $Root 'duplicate-ready'),'ready')
+    }
     if (Test-Path (Join-Path $Root 'open')) {
         Remove-Item -LiteralPath (Join-Path $Root 'open')
         $script:shared=New-Object Windows.Forms.Form
@@ -67,10 +74,24 @@ $form.Show(); $form.Hide()
     if ($oldClaim.outcome -ne 'not-dispatched' -or $oldClaim.error.type -ne 'TargetNotFound' -or $oldClaim.error.message -notmatch 'already present') {throw 'Preexisting-window rejection obscured the checkpoint cause or reported uncertain input.'}
     $ambiguous=Invoke-PotatoCliCommand focus @('-ProcessId',"$($child.Id)",'-TimeoutMs','0') -CliRoot $root -AsObject
     if ($ambiguous.ok -or $ambiguous.outcome -ne 'not-dispatched' -or $ambiguous.error.type -ne 'AmbiguousTarget' -or $ambiguous.error.candidates.Count -lt 2) {throw 'Ambiguous focus dispatched input or omitted observed candidates.'}
+    $foreground=Invoke-Fixture windows @('-Foreground')
+    $guard=$foreground.data.foregroundSelector | ConvertTo-Json -Compress
+    if (-not $foreground.data.foregroundSelector.NativeWindowHandle) {throw 'Foreground receipt omitted its exact observed handle.'}
+    [IO.File]::WriteAllText((Join-Path $root 'duplicate'),'create same-title sibling')
+    $ready=Invoke-Fixture wait-file @('-Path',(Join-Path $root 'duplicate-ready'),'-MinBytes','1','-TimeoutMs','3000')
+    if (-not $ready.data.conditionMet) {throw 'Same-title sibling fixture did not start.'}
+    $sameTitle=Invoke-PotatoCliCommand focus @('-ProcessId',"$($child.Id)",'-WindowTitle',$newTitle,'-TimeoutMs','0') -CliRoot $root -AsObject
+    if ($sameTitle.ok -or $sameTitle.error.type -ne 'AmbiguousTarget') {throw 'Same-title sibling windows were not detected as ambiguous.'}
+    $selected=Invoke-Fixture focus @('-WindowSelectorJson',$guard,'-Maximize')
+    if ($selected.data.working.nativeWindowHandle -ne $foreground.data.foregroundSelector.NativeWindowHandle -or $selected.data.ownedWindow) {throw 'Guarded focus ignored its handle or granted cleanup ownership.'}
+    $unowned=Invoke-PotatoCliCommand focus @('-WindowIdentityJson',$guard) -CliRoot $root -AsObject
+    if ($unowned.ok) {throw 'A selection guard became an ownership receipt.'}
+    $identity=Invoke-Fixture windows @('-WindowIdentityJson',$ticket)
+    if ($identity.data.count -ne 1 -or $identity.data.windows[0].identitySource -ne 'Win32WindowLifetime') {throw 'Owned lifetime observation still relied on the UIA provider.'}
     # Diagnostic snapshot includes the new window, but its earlier baseline
     # must remain usable through serialized state in the next CLI call.
     Invoke-Fixture windows @('-Checkpoint') | Out-Null
-    $claimed=Invoke-Fixture focus @('-ProcessId',"$($child.Id)",'-WindowTitle',$newTitle,'-SinceCheckpoint',$launch.data.checkpointId)
+    $claimed=Invoke-Fixture focus @('-WindowSelectorJson',$guard,'-SinceCheckpoint',$launch.data.checkpointId)
     if ($claimed.data.ownedWindow.nativeWindowHandle -ne $launch.data.ownedWindow.nativeWindowHandle -or $claimed.data.ownedProcessId) {throw 'GUI handoff did not register only its new window.'}
     $stale=$ticket | ConvertFrom-Json
     $stale.processStartTime=([long]$stale.processStartTime+1).ToString()
@@ -83,6 +104,7 @@ $form.Show(); $form.Hide()
     $args=@('-TargetMode','Focused','-ExpectedFocusJson','{"ClassName":"Edit"}','-FallbackReason','Synthetic native field','-FallbackEvidence','Visible fixture field')
     # Exact native Edit readback still works with a deliberately deficient UIA provider.
     $info=Invoke-Fixture observe @('-Format','Compact','-Depth','3')
+    Invoke-Fixture click @('-ClassName','Edit','-Mode','Mouse','-TimeoutMs','1000') | Out-Null
     $path=Join-Path $root ('long literal [path] +^%{} '+[char]0x151+' image.png')
     $typed=Invoke-Fixture type ($args+@('-Text',$path,'-PathKind','SaveFile','-PreDelete'))
     if (-not $typed.data.verified -or -not $typed.data.verificationPerformed) {throw 'Path typing did not require and pass exact field readback.'}

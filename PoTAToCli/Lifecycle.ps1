@@ -39,7 +39,7 @@ function New-PotatoOwnedWindow {
         processStartTime=$process.StartTime.ToUniversalTime().Ticks.ToString();className=$Working.className;title=$Working.title;windowToken=$token}
 }
 
-function Get-PotatoTicketWindow {
+function Get-PotatoOwnedWindowInfo {
     param([string]$Json)
     $ticket=ConvertFrom-PotatoJsonArgument $Json
     if (-not $ticket.nativeWindowHandle -or -not $ticket.processId -or -not $ticket.processStartTime -or -not $ticket.className -or $ticket.windowToken -notmatch '^[a-f0-9]{32}$') { throw 'WindowIdentityJson needs the complete ownedWindow receipt, including handle, process ID/start time, class and window token.' }
@@ -48,9 +48,32 @@ function Get-PotatoTicketWindow {
     if (-not [PotatoWindowIdentity]::HasWindowTag([IntPtr][long]$ticket.nativeWindowHandle,$ticket.windowToken)) { return $null }
     $process=Get-Process -Id $ticket.processId -ErrorAction SilentlyContinue
     if (-not $process -or $process.StartTime.ToUniversalTime().Ticks.ToString() -ne [string]$ticket.processStartTime) { return $null }
-    $window=[Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$ticket.nativeWindowHandle)
-    if ($window.Current.ClassName -cne $ticket.className) { return $null }
-    return $window
+    $handle=[IntPtr][long]$ticket.nativeWindowHandle
+    # A closing window's UIA provider can disappear before its HWND. Absence
+    # uses the native lifetime token, never a failed provider read as proof.
+    $info=[ordered]@{name=[PotatoWindowIdentity]::Title($handle);className=[PotatoWindowIdentity]::ClassName($handle);
+        processId=[int]$ticket.processId;nativeWindowHandle=[long]$ticket.nativeWindowHandle;
+        controlType='Window';isOffscreen=(-not [PotatoWindowIdentity]::IsWindowVisible($handle));identitySource='Win32WindowLifetime'}
+    if (-not [PotatoWindowIdentity]::HasWindowTag($handle,$ticket.windowToken) -or [PotatoWindowIdentity]::ProcessId($handle) -ne [int]$ticket.processId) {return $null}
+    return $info
+}
+
+function Get-PotatoTicketWindow {
+    param([string]$Json)
+    $info=Get-PotatoOwnedWindowInfo $Json
+    if (-not $info) {return $null}
+    try {
+        $window=[Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$info.nativeWindowHandle)
+        $ticket=ConvertFrom-PotatoJsonArgument $Json
+        if ($window.Current.ClassName -cne $ticket.className) {throw 'Owned UIA window class no longer matches its receipt.'}
+        return $window
+    }
+    catch {
+        if (-not (Get-PotatoOwnedWindowInfo $Json)) {return $null}
+        $failure=[InvalidOperationException]::new('The owned window still exists, but its UI Automation provider is unavailable. Its absence is unproven; inspect the window instead of broadening cleanup.')
+        $failure.Data['PotatoErrorType']='WindowInspectionUnavailable';$failure.Data['NoInputSent']=$true
+        throw $failure
+    }
 }
 
 function Invoke-PotatoStartWindow {

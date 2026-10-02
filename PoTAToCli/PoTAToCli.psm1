@@ -323,7 +323,8 @@ function New-PotatoSelectorFromArguments {
         @{ key = 'ControlType'; names = @('ControlType') },
         @{ key = 'ProcessName'; names = @('ProcessName') },
         @{ key = 'ProcessId'; names = @('ProcessId') },
-        @{ key = 'WindowTitle'; names = @('WindowTitle') }
+        @{ key = 'WindowTitle'; names = @('WindowTitle') },
+        @{ key = 'NativeWindowHandle'; names = @('NativeWindowHandle') }
     )) {
         $value = Get-PotatoArg -ArgsMap $ArgsMap -Names $pair.names
         if ($null -ne $value -and "$value" -ne '') {
@@ -331,6 +332,7 @@ function New-PotatoSelectorFromArguments {
         }
     }
 
+    if ($selector.NativeWindowHandle -and ($selector.NativeWindowHandle -notmatch '^\d+$' -or [decimal]$selector.NativeWindowHandle -lt 1 -or [decimal]$selector.NativeWindowHandle -gt [long]::MaxValue)) {throw 'NativeWindowHandle must be a positive observed window handle.'}
     $selector.ModalOnly = ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('ModalOnly')) $false
     $selector.InteractiveOnly = ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('InteractiveOnly')) $false
     $selector.Regex = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Regex')) $false
@@ -409,9 +411,11 @@ function Test-PotatoElementMatch {
 
     $regex = ConvertTo-PotatoBool $Selector.Regex $false
     $current = $Element.Current
+    if ($Selector.WindowGuard -and -not (Test-PotatoWindowGuardMatch $Element $Selector.WindowGuard)) {return $false}
     if ($Selector.InteractiveOnly -and ($current.IsOffscreen -or -not $current.IsEnabled)) { return $false }
     if ($Selector.ModalOnly -and -not (Test-PotatoModalAncestor $Element)) { return $false }
     if ($Selector.ProcessId -and $current.ProcessId -ne [int]$Selector.ProcessId) { return $false }
+    if ($Selector.NativeWindowHandle -and [long]$current.NativeWindowHandle -ne [long]$Selector.NativeWindowHandle) {return $false}
     $controlName = Get-PotatoControlTypeName -Element $Element
 
     if (-not (Test-PotatoPattern -Actual $current.Name -Expected $Selector.Name -Regex $regex)) { return $false }
@@ -862,6 +866,7 @@ function Get-PotatoTopLevelWindows {
             # descendant just to wait for a window title.
             Initialize-PotatoWindowIdentity
             $all=@(foreach ($handle in [PotatoWindowIdentity]::WindowHandles()) {
+                if ($Selector -and $Selector.NativeWindowHandle -and [long]$handle -ne [long]$Selector.NativeWindowHandle) {continue}
                 if (-not [PotatoWindowIdentity]::IsWindowVisible([IntPtr]$handle)) { continue }
                 if ($Selector -and $Selector.ProcessId -and [PotatoWindowIdentity]::ProcessId([IntPtr]$handle) -ne [int]$Selector.ProcessId) { continue }
                 try { [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$handle) }
@@ -880,7 +885,7 @@ function Get-PotatoTopLevelWindows {
             }
             # Some providers expose a modal Window beneath its owner in the UIA
             # tree, rather than as a desktop child. A PID-scoped query must see it.
-            if ($Selector -and $Selector.ProcessId) {
+            if ($Selector -and $Selector.ProcessId -and -not $Selector.NativeWindowHandle) {
                 $windowCondition = New-Object System.Windows.Automation.PropertyCondition(
                     [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
                     [System.Windows.Automation.ControlType]::Window)
@@ -1073,6 +1078,20 @@ function Invoke-PotatoFocus {
     $ticketJson=Get-PotatoArg $ArgsMap @('WindowIdentityJson')
     $checkpointId=Get-PotatoArg $ArgsMap @('SinceCheckpoint')
     if ($ticketJson -and $checkpointId) { throw 'Use WindowIdentityJson or SinceCheckpoint, not both.' }
+    $guardJson=Get-PotatoArg $ArgsMap @('WindowSelectorJson')
+    if ($guardJson -and $ticketJson) {throw 'Use WindowSelectorJson for selection or WindowIdentityJson for owned identity, not both.'}
+    $guard=if ($guardJson) {ConvertTo-PotatoWindowGuard $guardJson}
+    if ($guard) {
+        foreach ($key in @('Name','ClassName','ProcessId','NativeWindowHandle')) {
+            if ($guard.$key) {
+                if ($selector.$key -and [string]$selector.$key -cne [string]$guard.$key) {throw "Selector $key conflicts with the observed WindowSelectorJson guard."}
+                $selector[$key]=$guard.$key
+            }
+        }
+        # Guard labels are exact, including literal wildcard characters in
+        # filenames. Apply the guard during polling, not only after enumeration.
+        $selector.Name=$null;$selector.ClassName=$null;$selector.WindowGuard=$guard
+    }
     $checkpoint=if ($checkpointId) { Get-PotatoWindowCheckpoint $checkpointId }
     if ($checkpoint) {
         $watch=[Diagnostics.Stopwatch]::StartNew()
@@ -1085,10 +1104,11 @@ function Invoke-PotatoFocus {
     } else {
         $windows = if ($ticketJson) { @(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) } else { @(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
     }
+    if ($guard) {$windows=@($windows | Where-Object {Test-PotatoWindowGuardMatch $_ $guard})}
     if ($processId -gt 0) { $windows = @($windows | Where-Object { $_.Current.ProcessId -eq $processId }) }
     $window = $windows | Select-Object -First 1
     if (-not $window -or $windows.Count -gt 1) {
-        $message=if (-not $window) {'No matching top-level window was found.'} else {'More than one top-level window matches. Narrow the observed selector or use WindowIdentityJson.'}
+        $message=if (-not $window) {'No matching top-level window was found.'} else {'More than one top-level window matches. Use the fresh windows -Foreground foregroundSelector with WindowSelectorJson (including NativeWindowHandle), or an owned WindowIdentityJson receipt.'}
         if (-not $window -and $checkpoint -and $allMatches.Count) {$message+=' Matching windows were already present in that checkpoint; they cannot be claimed as new. Preserve them, or deliberately use plain focus without cleanup ownership. Do not pre-close all application windows.'}
         $failure=[InvalidOperationException]::new($message)
         $failure.Data['PotatoErrorType']=if ($window) {'AmbiguousTarget'} else {'TargetNotFound'}
@@ -1120,7 +1140,7 @@ function Invoke-PotatoWindows {
     $checkpointRequested=ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Checkpoint')) $false
     $waitForNotExists=ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('WaitForNotExists')) $false
     if ($timeoutMs -lt 0 -or $timeoutMs -gt 60000) { throw 'Windows TimeoutMs must be 0..60000.' }
-    if ($waitForNotExists -and ($foreground -or $checkpointRequested -or -not ($ticketJson -or $selector.Name -or $selector.WindowTitle -or $selector.AutomationId -or $selector.ClassName -or $selector.ProcessName -or $selector.ProcessId))) {
+    if ($waitForNotExists -and ($foreground -or $checkpointRequested -or -not ($ticketJson -or $selector.Name -or $selector.WindowTitle -or $selector.AutomationId -or $selector.ClassName -or $selector.ProcessName -or $selector.ProcessId -or $selector.NativeWindowHandle))) {
         throw 'WaitForNotExists requires an explicit window selector or WindowIdentityJson; it cannot combine with Foreground or Checkpoint.'
     }
     if ($foreground -and ($ticketJson -or $checkpointRequested)) { throw 'Foreground cannot be combined with WindowIdentityJson or Checkpoint.' }
@@ -1129,7 +1149,7 @@ function Invoke-PotatoWindows {
     if ($waitForNotExists) {
         $watch=[Diagnostics.Stopwatch]::StartNew()
         do {
-            $windows=@(if ($ticketJson) {Get-PotatoTicketWindow $ticketJson | Where-Object {$_}}
+            $windows=@(if ($ticketJson) {Get-PotatoOwnedWindowInfo $ticketJson | Where-Object {$_}}
                 else {Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs 0 -RequireComplete})
             if (-not $windows.Count -or $watch.ElapsedMilliseconds -ge $timeoutMs) {break}
             Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(50,$timeoutMs-$watch.ElapsedMilliseconds)))
@@ -1149,14 +1169,14 @@ function Invoke-PotatoWindows {
             Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(50,$timeoutMs-$watch.ElapsedMilliseconds)))
         } while ($true)
     }
-    elseif ($ticketJson) { $windows=@(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) }
+    elseif ($ticketJson) { $windows=@(Get-PotatoOwnedWindowInfo $ticketJson | Where-Object {$_}) }
     else { $windows=@(Get-PotatoTopLevelWindows -Selector $selector -TimeoutMs $timeoutMs) }
     $result=[ordered]@{
         count = $windows.Count
-        windows = @($windows | ForEach-Object { ConvertTo-PotatoElementInfo -Element $_ })
+        windows = @($windows | ForEach-Object {if ($ticketJson) {$_} else {ConvertTo-PotatoElementInfo -Element $_}})
         checkpointId = $(if ($checkpoint) {$checkpoint.id} else {$null})
         foregroundSelector = $(if ($foreground -and $windows.Count -eq 1) {
-            @{Name=$windows[0].Current.Name;ClassName=$windows[0].Current.ClassName;ProcessId=$windows[0].Current.ProcessId}
+            @{Name=$windows[0].Current.Name;ClassName=$windows[0].Current.ClassName;ProcessId=$windows[0].Current.ProcessId;NativeWindowHandle=[long]$windows[0].Current.NativeWindowHandle}
         })
     }
     if ($waitForNotExists) {
@@ -1238,7 +1258,7 @@ function Invoke-PotatoObserve {
     $root = Get-PotatoExplicitScope $ArgsMap
     if (-not $root) { $root=$working }
     $inputs=Get-PotatoSelectorInputs $ArgsMap
-    $hasSelector=$inputs.path -or $inputs.selector.Name -or $inputs.selector.AutomationId -or $inputs.selector.ClassName -or $inputs.selector.ControlType -or $inputs.selector.ProcessName -or $inputs.selector.ProcessId -or $inputs.selector.WindowTitle
+    $hasSelector=$inputs.path -or $inputs.selector.Name -or $inputs.selector.AutomationId -or $inputs.selector.ClassName -or $inputs.selector.ControlType -or $inputs.selector.ProcessName -or $inputs.selector.ProcessId -or $inputs.selector.WindowTitle -or $inputs.selector.NativeWindowHandle
     if ($hasSelector -and -not (-not $inputs.path -and $root -and (Test-PotatoElementMatch $root $inputs.selector))) {
         $target=Resolve-PotatoCommandTarget -ArgsMap $ArgsMap -AllowPathAsTarget
         if (-not $target.ok) {
@@ -1311,7 +1331,7 @@ function Resolve-PotatoCommandTarget {
     }
     $parent = $pathResult.element
 
-    $hasSimpleSelector = $selector.Name -or $selector.AutomationId -or $selector.ClassName -or $selector.ControlType -or $selector.ProcessName -or $selector.ProcessId -or $selector.WindowTitle
+    $hasSimpleSelector = $selector.Name -or $selector.AutomationId -or $selector.ClassName -or $selector.ControlType -or $selector.ProcessName -or $selector.ProcessId -or $selector.WindowTitle -or $selector.NativeWindowHandle
     if ($AllowPathAsTarget -and -not $hasSimpleSelector -and $path) {
         return [ordered]@{ ok = $true; element = $parent; selector = $selector }
     }
@@ -2179,7 +2199,7 @@ function Invoke-PotatoCloseWindow {
     $selector = New-PotatoSelectorFromArguments -ArgsMap $ArgsMap
     $selector.Recurse = $false
     $timeoutMs = ConvertTo-PotatoInt (Get-PotatoArg -ArgsMap $ArgsMap -Names @('TimeoutMs')) 0
-    $hasSelector = $selector.Name -or $selector.AutomationId -or $selector.ClassName -or $selector.ControlType -or $selector.ProcessName -or $selector.ProcessId -or $selector.WindowTitle
+    $hasSelector = $selector.Name -or $selector.AutomationId -or $selector.ClassName -or $selector.ControlType -or $selector.ProcessName -or $selector.ProcessId -or $selector.WindowTitle -or $selector.NativeWindowHandle
     $windows = @()
     $ticketJson=Get-PotatoArg $ArgsMap @('WindowIdentityJson')
     if ($ticketJson) { $windows=@(Get-PotatoTicketWindow $ticketJson | Where-Object {$_}) }

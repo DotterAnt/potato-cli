@@ -53,12 +53,17 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     $root.Current.ProcessId=0
     $found=@(Find-PotatoElement -Parent $root -Selector @{Name='Observed target'} -TimeoutMs 0)
     Check (-not $found.Count) 'Fallback traversed the entire desktop.'
-    foreach ($json in @('{}','{"Name":"Broker"}','{"Name":"Broker","ClassName":"Frame","Regex":true}','{"Name":"Broker","ClassName":"Frame","ProcessId":-1}','{"Name":"Broker","ClassName":"Frame","ProcessId":0}')) {
+    foreach ($json in @('{}','{"Name":"Broker"}','{"Name":"Broker","ClassName":"Frame","Regex":true}','{"Name":"Broker","ClassName":"Frame","ProcessId":-1}','{"Name":"Broker","ClassName":"Frame","ProcessId":0}','{"Name":"Broker","ClassName":"Frame","NativeWindowHandle":0}','{"Name":"Broker","ClassName":"Frame","NativeWindowHandle":"not-a-handle"}')) {
         Reject {Get-PotatoGuardedForegroundWindow $json} 'Invalid foreground guard accepted.' | Out-Null
     }
     $doubleEncoded=ConvertTo-Json -InputObject '{"Name":"Broker","ClassName":"Frame"}' -Compress
     $failure=Reject {Get-PotatoGuardedForegroundWindow $doubleEncoded} 'Double-encoded guard was accepted.'
     Check ($failure.Message -match 'double-encoded' -and $failure.Message -match 'No action was dispatched') 'Guard error did not explain string/object serialization.'
+    $windowA=[pscustomobject]@{Current=@{Name='Same [title]';ClassName='Frame';ProcessId=42;NativeWindowHandle=123}}
+    $windowB=[pscustomobject]@{Current=@{Name='Same [title]';ClassName='Frame';ProcessId=42;NativeWindowHandle=124}}
+    $guard=ConvertTo-PotatoWindowGuard '{"Name":"Same [title]","ClassName":"Frame","ProcessId":42,"NativeWindowHandle":123}'
+    Check ((Test-PotatoWindowGuardMatch $windowA $guard) -and -not (Test-PotatoWindowGuardMatch $windowB $guard)) 'Fresh native handle did not distinguish identical sibling windows.'
+    Check ((Test-PotatoElementMatch $windowA @{WindowGuard=$guard}) -and -not (Test-PotatoElementMatch $windowB @{WindowGuard=$guard})) 'Guard filtering changed literal bracket labels or accepted a sibling during polling.'
     $args=@{Scope='ForegroundWindow';FallbackReason='Observed broker';FallbackEvidence='fixture'}
     Check ((Get-PotatoInteractionPolicy $args click).mode -eq 'GuiNavigation') 'Guarded visible click was forbidden.'
     Reject {Get-PotatoInteractionPolicy @{Scope='ForegroundWindow'} observe} 'Broker scope accepted without evidence.' | Out-Null

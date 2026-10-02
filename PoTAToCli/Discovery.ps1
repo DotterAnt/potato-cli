@@ -6,26 +6,41 @@ function New-PotatoScopeFailure {
     return $failure
 }
 
-function Get-PotatoGuardedForegroundWindow {
+function ConvertTo-PotatoWindowGuard {
     param([string]$WindowSelectorJson)
     $selector=ConvertFrom-PotatoJsonArgument $WindowSelectorJson
     if ($selector -is [string]) {
-        throw 'WindowSelectorJson decoded to a string, not an object. The guard may be double-encoded: pass the JSON object or its JSON text once; do not serialize JSON text again. No action was dispatched.'
+        $failure=[InvalidOperationException]::new('WindowSelectorJson decoded to a string, not an object. The guard may be double-encoded: pass the JSON object or its JSON text once; do not serialize JSON text again. No action was dispatched.')
+        $failure.Data['PotatoErrorType']='InvalidWindowGuard';$failure.Data['NoInputSent']=$true;throw $failure
     }
     # A broker is a per-command GUI scope, never an adopted process or cleanup target.
     $keys=if ($selector -is [Collections.IDictionary]) {@($selector.Keys)} else {@($selector.PSObject.Properties.Name)}
     if (-not $selector -or -not ($selector.Name -is [string]) -or [string]::IsNullOrWhiteSpace($selector.Name) -or
         -not ($selector.ClassName -is [string]) -or [string]::IsNullOrWhiteSpace($selector.ClassName) -or
-        @($keys | Where-Object {$_ -notin @('Name','ClassName','ProcessId')}).Count -or
-        ($keys -contains 'ProcessId' -and ($selector.ProcessId -notmatch '^\d+$' -or [int]$selector.ProcessId -lt 1))) {
-        throw 'ForegroundWindow requires WindowSelectorJson with an exact observed Name and ClassName, and optional ProcessId only.'
+        @($keys | Where-Object {$_ -notin @('Name','ClassName','ProcessId','NativeWindowHandle')}).Count -or
+        ($keys -contains 'ProcessId' -and ($selector.ProcessId -notmatch '^\d+$' -or [decimal]$selector.ProcessId -lt 1 -or [decimal]$selector.ProcessId -gt [int]::MaxValue)) -or
+        ($keys -contains 'NativeWindowHandle' -and ($selector.NativeWindowHandle -notmatch '^\d+$' -or [decimal]$selector.NativeWindowHandle -lt 1 -or [decimal]$selector.NativeWindowHandle -gt [long]::MaxValue))) {
+        $failure=[InvalidOperationException]::new('WindowSelectorJson requires exact observed Name and ClassName, with optional positive ProcessId and NativeWindowHandle. It is a selection guard, not a cleanup ownership receipt.')
+        $failure.Data['PotatoErrorType']='InvalidWindowGuard';$failure.Data['NoInputSent']=$true;throw $failure
     }
+    return $selector
+}
+
+function Test-PotatoWindowGuardMatch {
+    param($Element,$Selector)
+    return ($Element.Current.Name -ceq $Selector.Name -and $Element.Current.ClassName -ceq $Selector.ClassName -and
+        (-not $Selector.ProcessId -or $Element.Current.ProcessId -eq [int]$Selector.ProcessId) -and
+        (-not $Selector.NativeWindowHandle -or [long]$Element.Current.NativeWindowHandle -eq [long]$Selector.NativeWindowHandle))
+}
+
+function Get-PotatoGuardedForegroundWindow {
+    param([string]$WindowSelectorJson)
+    $selector=ConvertTo-PotatoWindowGuard $WindowSelectorJson
     Initialize-PotatoWindowIdentity
     $handle=[PotatoWindowIdentity]::ForegroundRoot()
     if ($handle -eq [IntPtr]::Zero) { throw (New-PotatoScopeFailure 'No foreground window matches the guarded scope.') }
     $element=[Windows.Automation.AutomationElement]::FromHandle($handle)
-    if ($element.Current.Name -cne $selector.Name -or $element.Current.ClassName -cne $selector.ClassName -or
-        ($selector.ProcessId -and $element.Current.ProcessId -ne [int]$selector.ProcessId)) {
+    if (-not (Test-PotatoWindowGuardMatch $element $selector)) {
         throw (New-PotatoScopeFailure 'Foreground window does not match WindowSelectorJson. No action was dispatched; inspect the current window instead of guessing coordinates.')
     }
     return $element
@@ -216,7 +231,7 @@ function Get-PotatoBlockingDialog {
         $info=ConvertTo-PotatoElementInfo $dialog -Snapshot
         if (-not $info.name -or -not $info.className) { return $null }
         return @{name=$info.name;className=$info.className;processId=$info.processId;nativeWindowHandle=$info.nativeWindowHandle;
-            foregroundSelector=@{Name=$info.name;ClassName=$info.className;ProcessId=$info.processId}}
+            foregroundSelector=@{Name=$info.name;ClassName=$info.className;ProcessId=$info.processId;NativeWindowHandle=$info.nativeWindowHandle}}
     } catch { return $null } # Incomplete provider evidence never establishes a blocker.
 }
 
