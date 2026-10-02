@@ -7,6 +7,14 @@ $module = Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -
     function Check($ok,$message) { if (-not $ok) { throw $message }; $script:checks++ }
     function Reject([scriptblock]$body,$message) { $thrown=$false; try { & $body | Out-Null } catch {$thrown=$true}; Check $thrown $message }
     Initialize-PotatoAutomationTypes
+    $helper=[pscustomobject]@{Current=@{Name='';BoundingRectangle=@{X=0;Y=0;Width=1;Height=1}}}
+    Check (-not (Test-PotatoDisplayWindow $helper)) 'Nameless 1x1 infrastructure was treated as an interactive window.'
+    Check (-not (Test-PotatoElementMatch $helper @{DisplayWindowOnly=$true})) 'Infrastructure filtering ran after polling and could stop focus before the real window appeared.'
+    $helper.Current.BoundingRectangle.Width=500
+    Check (Test-PotatoDisplayWindow $helper) 'A genuine untitled window was excluded from ambiguity checks.'
+    $helper.Current.BoundingRectangle=[Windows.Rect]::Empty
+    Check (Test-PotatoDisplayWindow $helper) 'A minimized window was excluded from deliberate focus.'
+    Check ((Get-PotatoInteractionPolicy @{Scope='ForegroundWindow';WindowSelectorJson='{}';FallbackReason='Inspect observed dialog';FallbackEvidence='Fresh guard'} screenshot).mode -eq 'GuiNavigation') 'Read-only guarded screenshot was forbidden by policy.'
     Reject {Invoke-PotatoClick @{ClickCount='two'}} 'Invalid double-click count dispatched a default single click.'
     Reject {Invoke-PotatoClickCoordinate @{X=0;Y=0;ClickCount='two'}} 'Invalid coordinate double-click count moved or clicked the pointer.'
     Reject {Invoke-PotatoClick @{ClickCount=2;Method='Invoke'}} 'Double-click attempted an Invoke action.'

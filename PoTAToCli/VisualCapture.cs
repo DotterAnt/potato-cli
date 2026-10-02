@@ -10,10 +10,20 @@ public sealed class PotatoVisualFrame : IDisposable {
     public bool ConditionMet, Changed;
     public int Samples;
     public long ElapsedMs;
+    public double MeanError, MaxTileError, AspectError;
     public void Dispose() { if (Bitmap!=null) { Bitmap.Dispose(); Bitmap=null; } }
 }
 
 public static class PotatoVisualCapture {
+    static void Validate(Rectangle screen,Rectangle comparison,int timeoutMs,int stableMs) {
+        if (screen.Width<1 || screen.Height<1 || (long)screen.Width*screen.Height>16777216)
+            throw new ArgumentException("Visual wait capture must contain 1..16777216 pixels.");
+        if (comparison.X<0 || comparison.Y<0 || comparison.Width<1 || comparison.Height<1 ||
+            (long)comparison.X+comparison.Width>screen.Width || (long)comparison.Y+comparison.Height>screen.Height)
+            throw new ArgumentException("Comparison region must be a nonempty rectangle inside the screenshot, in image pixels.");
+        if (timeoutMs<0 || timeoutMs>60000 || stableMs<0 || stableMs>10000 || stableMs>timeoutMs)
+            throw new ArgumentException("Visual wait needs TimeoutMs 0..60000 and StableMs 0..10000, not exceeding TimeoutMs.");
+    }
     static Bitmap Capture(Rectangle screen) {
         var bitmap=new Bitmap(screen.Width,screen.Height);
         try {
@@ -41,13 +51,7 @@ public static class PotatoVisualCapture {
         return true;
     }
     public static PotatoVisualFrame Wait(string referencePath,Rectangle screen,Rectangle comparison,int timeoutMs,int stableMs) {
-        if (screen.Width<1 || screen.Height<1 || (long)screen.Width*screen.Height>16777216)
-            throw new ArgumentException("Visual wait capture must contain 1..16777216 pixels.");
-        if (comparison.X<0 || comparison.Y<0 || comparison.Width<1 || comparison.Height<1 ||
-            (long)comparison.X+comparison.Width>screen.Width || (long)comparison.Y+comparison.Height>screen.Height)
-            throw new ArgumentException("ChangeRegionJson must be a nonempty rectangle inside the screenshot, in image pixels.");
-        if (timeoutMs<0 || timeoutMs>60000 || stableMs<0 || stableMs>10000 || stableMs>timeoutMs)
-            throw new ArgumentException("Visual wait needs TimeoutMs 0..60000 and StableMs 0..10000, not exceeding TimeoutMs.");
+        Validate(screen,comparison,timeoutMs,stableMs);
         byte[] baseline;
         using (var stream=File.Open(referencePath,FileMode.Open,FileAccess.Read,FileShare.ReadWrite)) {
             if (stream.Length>16777216) throw new ArgumentException("Visual reference exceeds 16 MiB.");
@@ -74,6 +78,70 @@ public static class PotatoVisualCapture {
                 previous=pixels;
                 result.ElapsedMs=clock.ElapsedMilliseconds;
                 result.ConditionMet=result.Changed && result.ElapsedMs-stableSince>=stableMs;
+                if (result.ConditionMet || result.ElapsedMs>=timeoutMs) return result;
+                Thread.Sleep((int)Math.Max(1,Math.Min(50,timeoutMs-result.ElapsedMs)));
+            } while (true);
+        } catch {result.Dispose();throw;}
+    }
+
+    // Normalize the complete image/observed region, with the same RGB/tile
+    // metric as replay assertions. Do not infer a region from unrelated chrome.
+    static byte[] Normalize(Image image,Rectangle region) {
+        using (var bitmap=new Bitmap(128,128)) {
+            using (var graphics=Graphics.FromImage(bitmap))
+            using (var attributes=new System.Drawing.Imaging.ImageAttributes()) {
+                graphics.Clear(Color.White);
+                graphics.InterpolationMode=System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                attributes.SetWrapMode(System.Drawing.Drawing2D.WrapMode.TileFlipXY);
+                graphics.DrawImage(image,new Rectangle(0,0,128,128),region.X,region.Y,region.Width,region.Height,GraphicsUnit.Pixel,attributes);
+            }
+            var bits=bitmap.LockBits(new Rectangle(0,0,128,128),System.Drawing.Imaging.ImageLockMode.ReadOnly,System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            try {
+                var pixels=new byte[128*128*4];
+                for (int y=0;y<128;y++)
+                    System.Runtime.InteropServices.Marshal.Copy(IntPtr.Add(bits.Scan0,y*bits.Stride),pixels,y*128*4,128*4);
+                return pixels;
+            } finally {bitmap.UnlockBits(bits);}
+        }
+    }
+    public static PotatoVisualFrame WaitForMatch(string referencePath,int rotation,Rectangle screen,Rectangle comparison,
+        int timeoutMs,int stableMs,double maxMeanError,double maxTileError,double aspectTolerance) {
+        Validate(screen,comparison,timeoutMs,stableMs);
+        if (rotation!=0 && rotation!=90 && rotation!=180 && rotation!=270) throw new ArgumentException("ReferenceRotation must be 0,90,180,270 clockwise.");
+        if (double.IsNaN(maxMeanError) || maxMeanError<0 || maxMeanError>32 ||
+            double.IsNaN(maxTileError) || maxTileError<0 || maxTileError>64 ||
+            double.IsNaN(aspectTolerance) || aspectTolerance<0 || aspectTolerance>0.1)
+            throw new ArgumentException("Image match limits: mean 0..32, tile 0..64, aspect 0..0.1. Fix region/readiness/orientation instead of weakening content checks.");
+        byte[] expected; double aspectError;
+        using (var stream=File.Open(referencePath,FileMode.Open,FileAccess.Read,FileShare.ReadWrite)) {
+            if (stream.Length>16777216) throw new ArgumentException("Visual reference exceeds 16 MiB.");
+            using (var reference=Image.FromStream(stream,false,false)) {
+                if ((long)reference.Width*reference.Height>16777216) throw new ArgumentException("Decoded visual reference exceeds 16777216 pixels.");
+                if (rotation!=0) reference.RotateFlip(rotation==90 ? RotateFlipType.Rotate90FlipNone : rotation==180 ? RotateFlipType.Rotate180FlipNone : RotateFlipType.Rotate270FlipNone);
+                aspectError=Math.Abs((comparison.Width/(double)comparison.Height)/(reference.Width/(double)reference.Height)-1);
+                expected=Normalize(reference,new Rectangle(0,0,reference.Width,reference.Height));
+            }
+        }
+        var result=new PotatoVisualFrame {AspectError=aspectError}; var clock=Stopwatch.StartNew(); long matchingSince=-1;
+        try {
+            do {
+                if (result.Bitmap!=null) result.Bitmap.Dispose(); result.Bitmap=null;
+                result.Bitmap=Capture(screen); result.Samples++;
+                byte[] actual;
+                using (var crop=result.Bitmap.Clone(comparison,System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                    actual=Normalize(crop,new Rectangle(0,0,crop.Width,crop.Height));
+                var tiles=new double[64]; double sum=0;
+                for (int y=0;y<128;y++) for (int x=0;x<128;x++) {
+                    int offset=(y*128+x)*4; double delta=0;
+                    for (int channel=0;channel<3;channel++) delta+=Math.Abs(actual[offset+channel]-expected[offset+channel]);
+                    delta/=3;sum+=delta;tiles[(y/16)*8+x/16]+=delta;
+                }
+                result.MeanError=sum/(128*128);result.MaxTileError=0;
+                foreach (double tile in tiles) result.MaxTileError=Math.Max(result.MaxTileError,tile/256);
+                bool matches=aspectError<=aspectTolerance && result.MeanError<=maxMeanError && result.MaxTileError<=maxTileError;
+                result.ElapsedMs=clock.ElapsedMilliseconds;
+                if (!matches) matchingSince=-1; else if (matchingSince<0) matchingSince=result.ElapsedMs;
+                result.ConditionMet=matches && result.ElapsedMs-matchingSince>=stableMs;
                 if (result.ConditionMet || result.ElapsedMs>=timeoutMs) return result;
                 Thread.Sleep((int)Math.Max(1,Math.Min(50,timeoutMs-result.ElapsedMs)));
             } while (true);

@@ -78,6 +78,15 @@ function Get-PotatoExplicitScope {
     return $null
 }
 
+function Test-PotatoDisplayWindow {
+    param($Element)
+    # UIA can expose invisible infrastructure as enabled, onscreen 1x1 panes.
+    # Keep genuine sibling windows ambiguous and retain minimized windows.
+    $bounds=ConvertTo-PotatoRectangle $Element.Current.BoundingRectangle
+    return -not ($bounds -and $bounds.width -le 1 -and $bounds.height -le 1 -and
+        [string]::IsNullOrWhiteSpace($Element.Current.Name))
+}
+
 function Wait-PotatoGuardedForegroundWindow {
     param([hashtable]$ArgsMap)
     $timeout=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('TimeoutMs')) 1000

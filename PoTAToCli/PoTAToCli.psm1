@@ -412,6 +412,7 @@ function Test-PotatoElementMatch {
     $regex = ConvertTo-PotatoBool $Selector.Regex $false
     $current = $Element.Current
     if ($Selector.WindowGuard -and -not (Test-PotatoWindowGuardMatch $Element $Selector.WindowGuard)) {return $false}
+    if ($Selector.DisplayWindowOnly -and -not (Test-PotatoDisplayWindow $Element)) {return $false}
     if ($Selector.InteractiveOnly -and ($current.IsOffscreen -or -not $current.IsEnabled)) { return $false }
     if ($Selector.ModalOnly -and -not (Test-PotatoModalAncestor $Element)) { return $false }
     if ($Selector.ProcessId -and $current.ProcessId -ne [int]$Selector.ProcessId) { return $false }
@@ -1081,6 +1082,7 @@ function Invoke-PotatoFocus {
     $guardJson=Get-PotatoArg $ArgsMap @('WindowSelectorJson')
     if ($guardJson -and $ticketJson) {throw 'Use WindowSelectorJson for selection or WindowIdentityJson for owned identity, not both.'}
     $guard=if ($guardJson) {ConvertTo-PotatoWindowGuard $guardJson}
+    if (-not $guard -and -not $ticketJson -and -not $selector.NativeWindowHandle) {$selector.DisplayWindowOnly=$true}
     if ($guard) {
         foreach ($key in @('Name','ClassName','ProcessId','NativeWindowHandle')) {
             if ($guard.$key) {
@@ -2173,6 +2175,10 @@ function Invoke-PotatoScreenshot {
         $outFile = Join-Path -Path (Join-Path (Get-PotatoRunPath) 'screenshots') -ChildPath $name
     }
 
+    # Even a full/explicit-region capture must validate a supplied foreground
+    # guard. With no selector/rectangle, an explicit dialog scope captures that
+    # window; Working/default retains the established full-desktop behavior.
+    $captureScope=Get-PotatoExplicitScope $ArgsMap
     $region = $null
     $hasExplicitRegion = $ArgsMap.Contains('X') -or $ArgsMap.Contains('Y') -or $ArgsMap.Contains('Width') -or $ArgsMap.Contains('Height')
     if ($hasExplicitRegion) {
@@ -2191,6 +2197,7 @@ function Invoke-PotatoScreenshot {
             if (-not $target.ok) { throw $target.error }
             $region = ConvertTo-PotatoRectangle -Rectangle $target.element.Current.BoundingRectangle
         }
+        elseif ($captureScope) { $region=ConvertTo-PotatoRectangle $captureScope.Current.BoundingRectangle }
         else {
             $region = [ordered]@{ x = 0; y = 0; width = [PotatoWindowIdentity]::PrimaryWidth(); height = [PotatoWindowIdentity]::PrimaryHeight() }
         }
@@ -2198,19 +2205,23 @@ function Invoke-PotatoScreenshot {
 
     if (-not $region -or $region.width -le 0 -or $region.height -le 0) { throw 'Screenshot target has no usable bounds.' }
     $reference=Get-PotatoArg $ArgsMap @('WaitForChangeFrom')
+    $matchReference=Get-PotatoArg $ArgsMap @('WaitForImageMatch')
+    if ($reference -and $matchReference) {throw 'Use WaitForChangeFrom or WaitForImageMatch, not both.'}
     $visualWait=$null;$frame=$null
     try {
-        if ($reference) {
-            $comparison=ConvertFrom-PotatoJsonArgument (Get-PotatoArg $ArgsMap @('ChangeRegionJson'))
-            if (-not $comparison) {throw 'WaitForChangeFrom requires an observed ChangeRegionJson in screenshot image pixels; exclude hover/focus indicators and unrelated animation.'}
+        if ($reference -or $matchReference) {
+            $regionOption=if ($matchReference) {'MatchRegionJson'} else {'ChangeRegionJson'}
+            $comparison=ConvertFrom-PotatoJsonArgument (Get-PotatoArg $ArgsMap @($regionOption))
+            if (-not $comparison) {throw "Visual wait requires an observed $regionOption in screenshot image pixels; exclude chrome/hover/focus indicators."}
+            if (($reference -and $ArgsMap.ContainsKey('MatchRegionJson')) -or ($matchReference -and $ArgsMap.ContainsKey('ChangeRegionJson'))) {throw 'Comparison region option does not match the selected visual wait mode.'}
             foreach ($key in @('x','y','width','height')) {
-                if ($null -eq $comparison.$key -or [string]$comparison.$key -notmatch '^\d+$' -or [decimal]$comparison.$key -gt [int]::MaxValue) {throw 'ChangeRegionJson needs nonnegative integer x,y,width,height.'}
+                if ($null -eq $comparison.$key -or [string]$comparison.$key -notmatch '^\d+$' -or [decimal]$comparison.$key -gt [int]::MaxValue) {throw "$regionOption needs nonnegative integer x,y,width,height."}
             }
             $timeout=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('TimeoutMs')) 2000
             $stable=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('StableMs')) ([Math]::Min(150,$timeout))
             if (-not ('PotatoVisualCapture' -as [type])) {
                 $references=if ($PSVersionTable.PSVersion.Major -ge 6) {
-                    @([Drawing.Bitmap].Assembly.Location,[Drawing.Rectangle].Assembly.Location,'System.Runtime.dll','System.Runtime.Extensions.dll','System.Threading.Thread.dll','System.IO.FileSystem.dll','System.Diagnostics.TraceSource.dll')
+                    @([Drawing.Bitmap].Assembly.Location,[Drawing.Rectangle].Assembly.Location,'System.Runtime.dll','System.Runtime.Extensions.dll','System.Runtime.InteropServices.dll','System.Threading.Thread.dll','System.IO.FileSystem.dll','System.Diagnostics.TraceSource.dll')
                 } else {@('System.Drawing','System')}
                 # .NET 10 moved public Drawing interfaces into Windows support
                 # assemblies; older hosts do not have those dependencies.
@@ -2219,19 +2230,30 @@ function Invoke-PotatoScreenshot {
                 }
                 Add-Type -Path (Join-Path $PSScriptRoot 'VisualCapture.cs') -ReferencedAssemblies $references
             }
-            $reference=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($reference)
+            $reference=$ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($(if ($matchReference) {$matchReference} else {$reference}))
             if ($reference -eq $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($outFile)) {throw 'Visual wait output must differ from its reference path; preserve the before-action evidence.'}
             $screen=[Drawing.Rectangle]::new($region.x,$region.y,$region.width,$region.height)
             $area=[Drawing.Rectangle]::new($comparison.x,$comparison.y,$comparison.width,$comparison.height)
-            $frame=[PotatoVisualCapture]::Wait($reference,$screen,$area,$timeout,$stable)
-            $visualWait=[ordered]@{conditionMet=$frame.ConditionMet;changed=$frame.Changed;elapsedMs=$frame.ElapsedMs;samples=$frame.Samples;stableMs=$stable;comparisonRegion=$comparison}
-        } elseif ($ArgsMap.ContainsKey('ChangeRegionJson') -or $ArgsMap.ContainsKey('StableMs')) {throw 'ChangeRegionJson/StableMs require WaitForChangeFrom.'}
+            if ($matchReference) {
+                $rotation=[int](Get-PotatoArg $ArgsMap @('ReferenceRotation') 0)
+                $mean=[double](Get-PotatoArg $ArgsMap @('MatchMaxMeanError') 8)
+                $tile=[double](Get-PotatoArg $ArgsMap @('MatchMaxTileError') 24)
+                $aspect=[double](Get-PotatoArg $ArgsMap @('MatchAspectTolerance') 0.02)
+                $frame=[PotatoVisualCapture]::WaitForMatch($reference,$rotation,$screen,$area,$timeout,$stable,$mean,$tile,$aspect)
+                $visualWait=[ordered]@{mode='ExpectedImage';conditionMet=$frame.ConditionMet;referenceRotation=$rotation;meanError=$frame.MeanError;maxTileError=$frame.MaxTileError;aspectError=$frame.AspectError;maxMeanError=$mean;maxTileErrorLimit=$tile;aspectTolerance=$aspect}
+            } else {
+                if (@('ReferenceRotation','MatchMaxMeanError','MatchMaxTileError','MatchAspectTolerance') | Where-Object {$ArgsMap.ContainsKey($_)}) {throw 'Image match options require WaitForImageMatch.'}
+                $frame=[PotatoVisualCapture]::Wait($reference,$screen,$area,$timeout,$stable)
+                $visualWait=[ordered]@{mode='ChangedAndSettled';conditionMet=$frame.ConditionMet;changed=$frame.Changed}
+            }
+            $visualWait.elapsedMs=$frame.ElapsedMs;$visualWait.samples=$frame.Samples;$visualWait.stableMs=$stable;$visualWait.comparisonRegion=$comparison
+        } elseif (@('ChangeRegionJson','MatchRegionJson','StableMs','ReferenceRotation','MatchMaxMeanError','MatchMaxTileError','MatchAspectTolerance') | Where-Object {$ArgsMap.ContainsKey($_)}) {throw 'Visual wait options require WaitForChangeFrom or WaitForImageMatch.'}
         New-PotatoScreenshot -X $region.x -Y $region.y -Width $region.width -Height $region.height -OutFile $outFile -EncoderType $encoder -Quality $quality -CapturedBitmap $(if ($frame) {$frame.Bitmap} else {$null})
     } finally {if ($frame) {$frame.Dispose()}}
     $result=[ordered]@{ path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($outFile); region = $region; format = $encoder;
         coordinateSpace='PhysicalScreenPixels'; imageWidth=$region.width; imageHeight=$region.height;
         hint='Image pixels map to physical screen pixels plus region.x/y. Inspect the image before choosing a fallback point; do not use coordinates from a scaled preview.' }
-    if ($visualWait) {$result.visualWait=$visualWait;$result.conditionMet=$visualWait.conditionMet;$result.hint+=' Visual change/stability is a readiness check, not proof of the expected content. If unmet, inspect the final frame without repeating input.'}
+    if ($visualWait) {$result.visualWait=$visualWait;$result.conditionMet=$visualWait.conditionMet;$result.hint+=' Inspect retained pixels/metrics if unmet; never repeat input or raise tolerances to hide a wrong region, orientation or stale frame. Change/stability alone does not verify expected content.'}
     return $result
 }
 

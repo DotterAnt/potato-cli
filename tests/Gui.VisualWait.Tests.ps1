@@ -7,8 +7,16 @@ $child=$null;$script:checks=0
 function Check($ok,$message) {if (-not $ok) {throw $message};$script:checks++}
 try {
     $fixture=Join-Path $root 'fixture.ps1'
+    Add-Type -AssemblyName System.Drawing
+    $reference=Join-Path $root 'reference.png'
+    $pattern=[Drawing.Bitmap]::new(150,200)
+    try {
+        for ($y=0;$y -lt 200;$y++) {for ($x=0;$x -lt 150;$x++) {$pattern.SetPixel($x,$y,[Drawing.Color]::FromArgb($x,$y,[int](($x+$y)%150)))}}
+        $pattern.Save($reference,[Drawing.Imaging.ImageFormat]::Png)
+        $pattern.Save((Join-Path $root 'reference.jpg'),[Drawing.Imaging.ImageFormat]::Jpeg)
+    } finally {$pattern.Dispose()}
     @'
-param($Title)
+param($Title,$Reference)
 Add-Type -AssemblyName System.Windows.Forms
 $form=New-Object Windows.Forms.Form
 $form.Text=$Title;$form.Width=500;$form.Height=300;$form.StartPosition='CenterScreen'
@@ -23,6 +31,25 @@ $button.Add_Click({
     $script:timer.Start()
 })
 $form.Controls.AddRange(@($panel,$button))
+$expected=New-Object Windows.Forms.Button
+$expected.Text='Expected content';$expected.SetBounds(230,100,150,40)
+$expected.Add_Click({
+    $panel.BackColor=[Drawing.Color]::Blue;$script:phase=0
+    $script:contentTimer=New-Object Windows.Forms.Timer
+    $script:contentTimer.Interval=200
+    $script:contentTimer.Add_Tick({
+        $script:phase++
+        if ($script:phase -eq 1) {$panel.BackColor=[Drawing.Color]::Yellow}
+        if ($script:phase -eq 3) {
+            $script:contentTimer.Stop();$script:contentTimer.Dispose()
+            $panel.BackgroundImage=[Drawing.Bitmap]::new($Reference)
+            $panel.BackgroundImage.RotateFlip([Drawing.RotateFlipType]::Rotate90FlipNone)
+            $panel.Invalidate()
+        }
+    })
+    $script:contentTimer.Start()
+})
+$form.Controls.Add($expected)
 $menu=New-Object Windows.Forms.MenuStrip
 $choices=New-Object Windows.Forms.ToolStripMenuItem('Choices')
 [void]$choices.DropDownItems.Add('Fixture leaf')
@@ -31,7 +58,7 @@ $form.Show();$form.Hide()
 [void]$form.ShowDialog()
 '@ | Set-Content -LiteralPath $fixture -Encoding UTF8
     $title='PoTATo visual wait '+[guid]::NewGuid().ToString('N')
-    $child=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',('"'+$fixture+'"'),'-Title',('"'+$title+'"'))
+    $child=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-STA','-ExecutionPolicy','Bypass','-File',('"'+$fixture+'"'),'-Title',('"'+$title+'"'),'-Reference',('"'+$reference+'"'))
     $module=Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -PassThru
     function Run($command,$values) {
         $result=Invoke-PotatoCliCommand $command $values -CliRoot $root -AsObject
@@ -76,11 +103,47 @@ $form.Show();$form.Hide()
         $failure=Invoke-PotatoCliCommand screenshot ($capture+$args) -CliRoot $root -AsObject
         Check (-not $failure.ok) 'Invalid visual wait geometry/options survived validation.'
     }
+    # A changed/stable loading screen is insufficient: wait for the complete
+    # requested orientation, including a JPEG reference, without another click.
+    $hash=(Get-FileHash $reference).Hash
+    $watch.Restart()
+    Run click @('-Name','Expected content') | Out-Null
+    $matched=Run screenshot ($capture+@('-OutFile',(Join-Path $root 'matched.png'),'-WaitForImageMatch',$reference,'-ReferenceRotation','90','-MatchRegionJson',$comparison,'-TimeoutMs','3000'))
+    $matchElapsed=$watch.ElapsedMilliseconds
+    Check ($matched.data.conditionMet -and $matched.data.visualWait.mode -eq 'ExpectedImage' -and $matched.data.visualWait.samples -gt 1 -and $matchElapsed -ge 600 -and $matchElapsed -lt 3000) 'Expected-image wait accepted a blank/intermediate frame or spent its entire deadline.'
+    Check ($matched.data.visualWait.meanError -le 8 -and $matched.data.visualWait.maxTileError -le 24) 'Expected-image wait lost measured content errors.'
+    $jpegMatch=Run screenshot ($capture+@('-WaitForImageMatch',(Join-Path $root 'reference.jpg'),'-ReferenceRotation','90','-MatchRegionJson',$comparison,'-TimeoutMs','0'))
+    Check $jpegMatch.data.conditionMet 'Expected content comparison rejected a legitimate compressed input reference.'
+    $wrong=Run screenshot ($capture+@('-OutFile',(Join-Path $root 'wrong.png'),'-WaitForImageMatch',$reference,'-ReferenceRotation','270','-MatchRegionJson',$comparison,'-TimeoutMs','150'))
+    Check (-not $wrong.data.conditionMet -and $wrong.data.visualWait.elapsedMs -ge 150 -and (Test-Path $wrong.data.path)) 'Wrong rotation passed or its final diagnostic frame was lost.'
+    Check ((Get-FileHash $reference).Hash -eq $hash) 'Expected-image wait changed the source reference.'
+    foreach ($args in @(
+        @('-WaitForImageMatch',$reference),
+        @('-WaitForImageMatch',$reference,'-MatchRegionJson',$comparison,'-ReferenceRotation','45'),
+        @('-WaitForImageMatch',$reference,'-MatchRegionJson',$comparison,'-MatchMaxMeanError','135'),
+        @('-WaitForImageMatch',$reference,'-MatchRegionJson',$comparison,'-MatchMaxTileError','180'),
+        @('-WaitForImageMatch',$reference,'-MatchRegionJson',$comparison,'-WaitForChangeFrom',$before.data.path),
+        @('-MatchRegionJson',$comparison),
+        @('-ReferenceRotation','90')
+    )) {
+        $failure=Invoke-PotatoCliCommand screenshot ($capture+$args) -CliRoot $root -AsObject
+        Check (-not $failure.ok) 'Invalid expected-content wait options survived validation.'
+    }
+    $foreground=Run windows @('-Foreground','-WindowTitle',$title,'-TimeoutMs','1000')
+    $guard=$foreground.data.foregroundSelector | ConvertTo-Json -Compress
+    $guardArgs=@('-Scope','ForegroundWindow','-WindowSelectorJson',$guard,'-FallbackReason','Inspect fixture dialog','-FallbackEvidence','Fresh fixture foreground window')
+    $scoped=Run screenshot ($guardArgs+@('-OutFile',(Join-Path $root 'scoped.png')))
+    $windowBounds=$foreground.data.windows[0].boundingRectangle
+    Check ($scoped.data.region.width -eq $windowBounds.width -and $scoped.data.region.height -eq $windowBounds.height -and $scoped.data.region.x -eq $windowBounds.x -and $scoped.data.region.y -eq $windowBounds.y) 'Guarded foreground capture was rejected, ignored its window, or lost its physical origin.'
+    $badGuard=$guard | ConvertFrom-Json;$badGuard.Name='Wrong observed window'
+    $badPath=Join-Path $root 'bad-guard.png'
+    $bad=Invoke-PotatoCliCommand screenshot @('-Scope','ForegroundWindow','-WindowSelectorJson',($badGuard | ConvertTo-Json -Compress),'-FallbackReason','Inspect fixture','-FallbackEvidence','Fixture','-TimeoutMs','0','-X',"$($area.x)",'-Y',"$($area.y)",'-Width','20','-Height','20','-OutFile',$badPath) -CliRoot $root -AsObject
+    Check (-not $bad.ok -and $bad.error.type -eq 'ScopeNotReady' -and -not (Test-Path $badPath)) 'Explicit screenshot rectangle bypassed a mismatching foreground guard.'
     $opened=Run click @('-Name','Choices')
     $expectedAction=if ($opened.data.element.supportedPatterns -contains 'ExpandCollapse') {'ExpandCollapsePattern'} else {'InvokePattern'}
     Check ($opened.data.action -eq $expectedAction) 'Live submenu used the wrong available action.'
     Check ((Run select @('-Name','Fixture leaf','-TimeoutMs','1000')).data.count -eq 1) 'Live submenu expansion did not expose its child.'
-    "Visual wait checks: $script:checks passed; delayed update capture=${elapsed}ms, samples=$($after.data.visualWait.samples)."
+    "Visual wait checks: $script:checks passed; changed capture=${elapsed}ms; expected content=${matchElapsed}ms, samples=$($matched.data.visualWait.samples)."
 } finally {
     if ($child -and -not $child.HasExited) {$child.CloseMainWindow() | Out-Null;if (-not $child.WaitForExit(3000)) {$child.Kill();[void]$child.WaitForExit(3000)}}
     $resolved=[IO.Path]::GetFullPath($root)

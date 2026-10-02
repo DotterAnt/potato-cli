@@ -9,7 +9,7 @@ function Get-PotatoInteractionPolicy {
     $reason = [string](Get-PotatoArg $ArgsMap @('FallbackReason') '')
     $evidence = [string](Get-PotatoArg $ArgsMap @('FallbackEvidence') '')
     if ((Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') {
-        if ($Command -notin @('observe','select','read','wait-element','click','type','press-key')) { throw 'Guarded ForegroundWindow supports observation, selector clicks and guarded text/navigation; it never grants process ownership.' }
+        if ($Command -notin @('observe','select','read','wait-element','screenshot','click','type','press-key')) { throw 'Guarded ForegroundWindow supports observation/screenshots, selector clicks and guarded text/navigation; it never grants process ownership.' }
         if ($Command -eq 'type' -and (Get-PotatoArg $ArgsMap @('TargetMode') 'Writable') -eq 'Focused' -and -not (Get-PotatoArg $ArgsMap @('ExpectedFocusJson'))) { throw 'Focused typing in ForegroundWindow requires ExpectedFocusJson for the observed input control.' }
         if ([string]::IsNullOrWhiteSpace($reason) -or [string]::IsNullOrWhiteSpace($evidence)) { throw 'ForegroundWindow requires FallbackReason and FallbackEvidence for the observed system-hosted GUI route.' }
         if ((ConvertTo-PotatoBool (Get-PotatoArg $ArgsMap @('Focus')) $false) -or
