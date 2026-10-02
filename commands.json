@@ -43,7 +43,7 @@
     },
     "start": {
       "usage": "start -ProcessName app.exe [-Arguments='quoted process arguments'] [-WaitForWindowMs 15000] [-Maximize] [-KillExisting] [-RequireNewProcess] [-WaitForPreviousExitMs 3000] [-RequireNewWindow]",
-      "notes": "Executable launches only. RequireNewWindow (framework default) snapshots desktop handles and waits for a new visible window of the executable, including handoff to an existing process. Returns ownedProcessId/start time for a new host or ownedWindow for a shared host. Never claims an old window or a short-lived launcher PID. No new window is an error; inspect windows and deliberately focus the intended window. RequireNewProcess remains available for strict isolation; do not combine the two modes or KillExisting. File manager GUI navigation/Open/double-click is supported; shell/protocol launcher wrappers bypass that GUI route and are rejected. Values starting with a dash must use -Arguments=<value> in one token."
+      "notes": "Executable launches only. RequireNewWindow (framework default) snapshots desktop handles and waits for a new visible window of the executable, including handoff to an existing process. Returns ownedProcessId/start time for a new host or ownedWindow for a shared host. Never claims an old window or a short-lived launcher PID. No new window is an error; inspect windows and deliberately focus the intended window. RequireNewProcess remains available for strict isolation; do not combine the two modes or KillExisting. A bare document/path/URL in Arguments and shell/protocol launcher wrappers bypass the GUI Open route and are rejected. Launch the executable, then use its visible Open route. Values starting with a dash must use -Arguments=<value> in one token."
     },
     "focus": {
       "usage": "focus -ProcessName app [-WindowTitle '*title*'] [-ProcessId 1234] [-Maximize] [-TimeoutMs 5000] [-SinceCheckpoint <id> | -WindowIdentityJson <ownedWindow JSON>]",
@@ -82,7 +82,7 @@
     "press-key": {
       "focusInput": "Uses the same native-confirmed owned keyboard target as focused typing. FocusTimeoutMs is 0..10000, default 2000. UIA focus disagreement alone does not block navigation. Ownership is rechecked before each key; a partially dispatched sequence still has outcome unknown on failure.",
       "usage": "press-key -Key Tab|ShiftTab|Enter|Escape|Left|Right|Up|Down [-Count 1] -FallbackReason <reason> -FallbackEvidence <reference> [-ExpectedFocusJson <identity>] [-Scope ForegroundWindow -WindowSelectorJson <identity>]",
-      "notes": "GuiNavigation/AllowShortcuts only. Sends bounded navigation to confirmed focus in the working application or its owned dialog and returns focus before/after. Count is 1..20; Enter/Escape must be single actions followed by an observation. No application hotkeys, function keys, clipboard, key expressions, or implicit refocus. Required menu/button routes still apply. Dispatch does not verify the application postcondition."
+      "notes": "GuiNavigation/AllowShortcuts only. Sends bounded navigation to confirmed focus in the working application or its owned dialog and returns focus before/after. afterError reports an optional post-input provider readback failure without invalidating sent=true; inspect the actual postcondition before retrying. Count is 1..20; Enter/Escape must be single actions followed by an observation. No application hotkeys, function keys, clipboard, key expressions, or implicit refocus. Required menu/button routes still apply. Dispatch does not verify the application postcondition."
     },
     "hotkey": {
       "usage": "hotkey -Keys ^s -InteractionPolicy AllowShortcuts -FallbackReason <reason> -FallbackEvidence <reference>",
@@ -90,14 +90,14 @@
     },
     "drag": {
       "usage": "drag -SourceSelectorJson <selector> -TargetSelectorJson <selector> [-SourceRelativeX 0.5 -SourceRelativeY 0.5] [-TargetRelativeX 0.5 -TargetRelativeY 0.5] [-DurationMs 300] [-Smooth true] OR drag -StartX 100 -StartY 100 -EndX 200 -EndY 200",
-      "notes": "Click/hold, move, and drop using the left mouse button. Each endpoint can be a selector (including nested paths) or coordinates. Resolves both visible/enabled controls before pressing. Fractions choose a point inside current element bounds; defaults are centers. Movement is smooth by default; DurationMs is 50..10000. Always releases the button on failure. released/dragged mean input delivery; assert the actual drop result separately. Coordinate endpoints need observed fallback evidence."
+      "notes": "Click/hold, move, and drop using checked SendInput mouse events in physical virtual-desktop coordinates. Each endpoint can be a selector (including nested paths) or coordinates. Resolves both visible/enabled controls before pressing; a missing endpoint has outcome not-dispatched. Fractions choose a point inside current element bounds; defaults are centers. Smooth motion uses native elapsed-time interpolation; DurationMs is 50..10000. Always attempts button release after pressing, including failure. released/dragged mean input delivery; assert the actual drop result separately. Coordinate endpoints need observed fallback evidence."
     },
     "hover": {
       "usage": "hover <selector options> | hover -X 100 -Y 100"
     },
     "wait-element": {
       "usage": "wait-element <selector options>",
-      "notes": "Assert data.exists, not just ok. Presence waits stop at the first match and include the application/scope root; use select for match counts. Use TimeoutMs; scoped waits allow 0..60000 ms. Scope FocusedWindow/ForegroundWindow waits tolerate a temporarily different foreground owner/guard and refresh the root until the deadline. data.lastScopeError explains an unmet ownership/guard condition. Invalid selectors still fail immediately. Add InteractiveOnly for a visible enabled submit control. A launched window does not prove blank document state or readiness."
+      "notes": "Assert data.exists, not just ok. Presence waits stop at the first match and include the application/scope root; use select for match counts. A control wait behind a disabled working window and confirmed owned foreground modal fails early with WaitBlockedByDialog and error.blockingDialog.foregroundSelector. Inspect the actual dialog before recovery. Use TimeoutMs; scoped waits allow 0..60000 ms. Scope FocusedWindow/ForegroundWindow waits tolerate a temporarily different foreground owner/guard and refresh the root until the deadline. data.lastScopeError explains an unmet ownership/guard condition. Invalid selectors still fail immediately. Add InteractiveOnly for a visible enabled submit control. A launched window does not prove blank document state or readiness."
     },
     "wait-file": {
       "usage": "wait-file -Path 'output.ext' [-TimeoutMs 10000] [-MinBytes 1] [-StableMs 500] [-WaitForNotExists]",

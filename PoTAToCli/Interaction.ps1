@@ -44,6 +44,15 @@ function Get-PotatoInteractionPolicy {
         if ($launch -and ([IO.Path]::GetExtension($launch) -notin @('', '.exe'))) { throw 'start launches executables only. Open documents through the application GUI.' }
         $launcher=[IO.Path]::GetFileNameWithoutExtension($launch)
         $launchArgs=[string](Get-PotatoArg $ArgsMap @('Arguments','ArgumentList'))
+        # Starting the executable with a bare document/resource still bypasses
+        # the testcase's GUI Open route, even though ProcessName itself is valid.
+        $firstArgument=$null
+        if ($launchArgs -match '^\s*(?:"([^"]+)"|(\S+))') {
+            $firstArgument=if ($Matches[1]) {$Matches[1]} else {$Matches[2]}
+        }
+        if ($firstArgument -and ($firstArgument -match '^(?:[A-Za-z]:[\\/]|\\\\|[A-Za-z][A-Za-z0-9+.-]*://)' -or [IO.File]::Exists($firstArgument))) {
+            throw 'start Arguments begins with a document/path/URL. Start the executable without that resource, then use its observed GUI Open route; launch arguments are not a substitute for a tested open step.'
+        }
         if (($launcher -eq 'cmd' -and $launchArgs -match '(?i)/[ck]\b.*\bstart\b') -or
             ($launcher -in @('powershell','pwsh') -and $launchArgs -match '(?i)\bStart-Process\b|-(?:enc|encodedcommand)\b') -or
             ($launcher -eq 'rundll32' -and $launchArgs -match '(?i)FileProtocolHandler|ShellExec_RunDLL') -or
@@ -248,8 +257,14 @@ function Invoke-PotatoPressKey {
         # Allow the GUI to consume queued input before checking the next target.
         Start-Sleep -Milliseconds 30
     }
-    $after = Get-PotatoFocusedElement
-    [ordered]@{ sent=$true; key=$key; count=$count; before=$before; after=$(if ($after) { ConvertTo-PotatoElementInfo $after }); verified=$null; verificationPerformed=$false }
+    # Committing a control can invalidate its provider after input was delivered.
+    # Optional focus readback must not turn that delivery into a failed command.
+    $after=$null; $afterError=$null
+    try {
+        $after=Get-PotatoFocusedElement
+        if ($after) { $after=ConvertTo-PotatoElementInfo $after }
+    } catch { $afterError=@{type=$_.Exception.GetType().FullName;message=$_.Exception.Message};$after=$null }
+    [ordered]@{ sent=$true; key=$key; count=$count; before=$before; after=$after; afterError=$afterError; verified=$null; verificationPerformed=$false }
 }
 
 function Send-PotatoNavigationKey {

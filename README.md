@@ -251,7 +251,7 @@ Run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\Regression.Te
 
 Every command defaults to `-InteractionPolicy GuiNavigation`. Preserve an explicitly requested `VisibleControls` policy, which also rejects navigation keys. Ordinary `type` is literal, never clipboard-based, and checks writability and actual focus in the working application or its owned dialog. For an observed opaque editor, use `-TargetMode Focused -FallbackReason <reason> -FallbackEvidence <reference>` after visibly focusing it. This explicit fallback cannot refocus, clear text, override reported read-only state, or embed Enter/Tab. It records the actual target and requires a separate expected-result assertion.
 
-`press-key -Key Tab|ShiftTab|Enter|Escape|Left|Right|Up|Down` sends bounded navigation under GuiNavigation with reason/evidence. Enter/Escape are single actions, followed by observation. Required menu/button routes still apply. `hotkey` and Shortcut clearing remain blocked unless AllowShortcuts is explicitly authorized. Clipboard is unsupported. A failed selector never authorizes object models, direct expected-output creation, or bypassing the GUI.
+`press-key -Key Tab|ShiftTab|Enter|Escape|Left|Right|Up|Down` sends bounded navigation under GuiNavigation with reason/evidence. Enter/Escape are single actions, followed by observation. `afterError` reports an optional focus readback failure after a key was sent; `sent=true` requires inspecting the application before a retry. Required menu/button routes still apply. `hotkey` and Shortcut clearing remain blocked unless AllowShortcuts is explicitly authorized. Clipboard is unsupported. A failed selector never authorizes object models, direct expected-output creation, or bypassing the GUI. `start` also rejects a bare document/path/URL in `Arguments`; launch the executable and perform the GUI Open route.
 
 For controls that update their value only on commit, type once, commit through an observed visible control or permitted Enter, then read/assert. Immediate `type -Verify` does not commit or retype.
 
@@ -264,7 +264,9 @@ For controls that update their value only on commit, type once, commit through a
 .\potato.ps1 drag -StartX 100 -StartY 100 -EndX 200 -EndY 200
 ```
 
-Relative coordinates are fractions inside current element bounds. Drag endpoints also accept SourceRelativeX/Y and TargetRelativeX/Y (center by default), and nested selector paths. Both endpoints are resolved before pressing the mouse. Movement is smooth by default; the left button is released in a finally block even on failure. `dragged`/`released` report input delivery; assert the application's actual drop result separately.
+Relative coordinates are fractions inside current element bounds. Drag endpoints also accept SourceRelativeX/Y and TargetRelativeX/Y (center by default), and nested selector paths. Both endpoints are resolved before pressing the mouse; a missing endpoint reports no input sent. Mouse movement and buttons use checked `SendInput`, including physical virtual-desktop coordinates and elapsed-time native interpolation. The left button is released in a finally block after pressing, including failure. `dragged`/`released` report input delivery; assert the application's actual drop result separately.
+
+When a control presence wait misses and the working window is disabled by a confirmed owned foreground modal, it fails early with `WaitBlockedByDialog`. Inspect `error.blockingDialog.foregroundSelector` and the actual dialog before recovery. Unrelated foreground windows and incomplete provider evidence do not establish a blocker.
 
 The stream stops at the first failed command by default. Use `-ContinueOnError` only with an interactive caller that reads and reconciles each response before sending more actions.
 

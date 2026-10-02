@@ -35,6 +35,10 @@ $module = Import-Module (Join-Path $cliRoot 'PoTAToCli\PoTAToCli.psm1') -Force -
         Reject { Get-PotatoInteractionPolicy $allow hotkey } 'Clipboard/compound shortcut accepted.'
     }
     Reject { Get-PotatoInteractionPolicy @{ProcessName='example.document'} start } 'File association launch accepted.'
+    foreach ($arguments in @('"C:\run folder\created.data"','C:/run/created.data','file:///C:/run/created.data','https://example.invalid/resource')) {
+        Reject {Get-PotatoInteractionPolicy @{ProcessName='example.exe';Arguments=$arguments} start} 'Executable document/resource arguments bypassed the GUI Open route.'
+    }
+    Check ((Get-PotatoInteractionPolicy @{ProcessName='example.exe';Arguments='--new-window'} start).mode -eq 'GuiNavigation') 'Ordinary executable options were rejected as document arguments.'
     Reject { Get-PotatoInteractionPolicy @{Text=[string][char]22} type } 'Clipboard control character accepted as text.'
     Check ((Get-PotatoInteractionPolicy @{Text='^s literal'} type).mode -eq 'GuiNavigation') 'Literal text was treated as hotkey.'
     Reject { Get-PotatoInteractionPolicy @{InteractionPolicy='VisibleControls';Key='Enter'} press-key } 'Strict policy accepted navigation.'

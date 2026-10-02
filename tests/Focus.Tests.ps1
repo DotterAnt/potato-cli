@@ -56,5 +56,9 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     $changed=$null
     try { Invoke-PotatoPressKey @{Key='Down';Count=3} | Out-Null } catch { $changed=$_.Exception }
     Check ($script:sent -eq 1 -and $changed.Data['PotatoErrorType'] -eq 'InputFocusChanged' -and $changed.Data['NoInputSent'] -eq $false) 'Repeated navigation continued into a new modal or claimed no input after the first key.'
+    $script:sent=0
+    function Get-PotatoFocusedElement {throw [ArgumentException]::new('Value does not fall within the expected range.')}
+    $delivered=Invoke-PotatoPressKey @{Key='Enter'}
+    Check ($script:sent -eq 1 -and $delivered.sent -and $null -eq $delivered.after -and $delivered.afterError.message -match 'expected range' -and -not $delivered.verificationPerformed) 'An unreadable post-input provider falsely failed delivered navigation or claimed verification.'
     "Focus checks: $script:checks passed"
 }

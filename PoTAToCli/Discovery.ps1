@@ -202,6 +202,24 @@ function Assert-PotatoUniqueMatches {
 
 function Get-PotatoFocusedElement { [System.Windows.Automation.AutomationElement]::FocusedElement }
 
+function Get-PotatoBlockingDialog {
+    param($Parent)
+    try {
+        if (-not $Parent -or $Parent.Current.IsEnabled -or -not $script:CurrentState.working) { return $null }
+        Initialize-PotatoWindowIdentity
+        $handle=[PotatoWindowIdentity]::GetForegroundWindow()
+        $owner=[IntPtr]$script:CurrentState.working.nativeWindowHandle
+        if ($handle -eq $owner -or $owner -eq [IntPtr]::Zero -or -not [PotatoWindowIdentity]::IsOwnedBy($handle,$owner)) { return $null }
+        $dialog=[Windows.Automation.AutomationElement]::FromHandle($handle)
+        $pattern=$null
+        if (-not $dialog.Current.IsEnabled -or -not $dialog.TryGetCurrentPattern([Windows.Automation.WindowPattern]::Pattern,[ref]$pattern) -or -not $pattern.Current.IsModal) { return $null }
+        $info=ConvertTo-PotatoElementInfo $dialog -Snapshot
+        if (-not $info.name -or -not $info.className) { return $null }
+        return @{name=$info.name;className=$info.className;processId=$info.processId;nativeWindowHandle=$info.nativeWindowHandle;
+            foregroundSelector=@{Name=$info.name;ClassName=$info.className;ProcessId=$info.processId}}
+    } catch { return $null } # Incomplete provider evidence never establishes a blocker.
+}
+
 function Wait-PotatoExpectedFocus {
     param([string]$SelectorJson, [int]$TimeoutMs=2000)
     return (Wait-PotatoInputFocus $SelectorJson $TimeoutMs).element

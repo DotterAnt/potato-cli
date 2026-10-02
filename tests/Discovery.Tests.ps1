@@ -80,6 +80,13 @@ $module=Import-Module (Join-Path (Split-Path $PSScriptRoot) 'PoTAToCli\PoTAToCli
     Check ($ready.exists -and $ready.count -eq 1) 'Presence wait enumerated unnecessary duplicates.'
     $all=Invoke-PotatoSelect @{Name='Duplicate';TimeoutMs=0}
     Check ($all.count -eq 2) 'Presence optimization changed select cardinality.'
+    function Get-PotatoBlockingDialog {param($Parent) @{name='Fixture validation';foregroundSelector=@{Name='Fixture validation';ClassName='Fixture'}}}
+    $script:presenceRoot=New-Node 'Container'
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $failure=Reject {Invoke-PotatoWaitElement @{Name='Unavailable while blocked';TimeoutMs=3000}} 'Presence wait ignored a confirmed modal blocker.'
+    Check ($failure.Data['PotatoErrorType'] -eq 'WaitBlockedByDialog' -and $failure.Data['blockingDialog'].name -eq 'Fixture validation' -and $clock.ElapsedMilliseconds -lt 1500) 'Modal wait lost its diagnostics or spent the ordinary timeout.'
+    $all=Invoke-PotatoSelect @{Name='Unavailable while blocked';TimeoutMs=0}
+    Check ($all.count -eq 0) 'Read-only select inherited the presence-wait blocker exception.'
     $script:reads=0
     function Invoke-PotatoSelect {param($ArgsMap)
         $script:reads++

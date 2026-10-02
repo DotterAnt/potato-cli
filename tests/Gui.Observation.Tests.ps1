@@ -94,6 +94,9 @@ $form.Show();$form.Hide()
     Check $typed.data.verified 'Exact guarded typing did not wait for a delayed dialog.'
     $window=Run wait-element @('-Name','PoTATo delayed dialog','-ControlType','Window','-TimeoutMs','1000')
     Check ($window.data.exists -and $window.data.count -eq 1) 'Window wait missed the native owned dialog.'
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $blocked=Invoke-PotatoCliCommand wait-element @('-Name','Fixture control absent behind modal','-TimeoutMs','10000') -CliRoot $root -AsObject
+    Check (-not $blocked.ok -and $blocked.error.type -eq 'WaitBlockedByDialog' -and $blocked.error.blockingDialog.foregroundSelector.Name -eq 'PoTATo delayed dialog' -and $clock.ElapsedMilliseconds -lt 5000) "An actual owned modal did not stop the blocked readiness wait with a usable guard: $($blocked | ConvertTo-Json -Depth 8 -Compress)"
     Run click ($scope+@('-Name','Cancel')) | Out-Null
     $result=@{checks=$script:checks;measurement=$measurement;boundedTreeObserveMs=$observe.durationMs;focusOnlyObserveMs=$focused.durationMs;
         note='Full bounded tree and focus-only observe inspect different states/data; focus-only is sufficient only when the current target is the needed observation.'}

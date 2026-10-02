@@ -72,18 +72,7 @@ function Initialize-PotatoNativeMouse {
     if ('PotatoMouseNative' -as [type]) { return $true }
 
     try {
-        $attributeName = 'Dll' + 'Import'
-        $libraryName = 'user' + '32.dll'
-        $entryPoint = 'mouse' + '_event'
-        $source = @"
-using System;
-using System.Runtime.InteropServices;
-public class PotatoMouseNative {
-    [$attributeName("$libraryName", EntryPoint="$entryPoint", CharSet = CharSet.Auto, CallingConvention = CallingConvention.StdCall)]
-    public static extern void MouseEvent(int dwFlags, int dx, int dy, int cButtons, int dwExtraInfo);
-}
-"@
-        Add-Type -TypeDefinition $source
+        Add-Type -Path (Join-Path $PSScriptRoot 'MouseInput.cs')
         return $true
     }
     catch {
@@ -554,7 +543,8 @@ function Find-PotatoElement {
         [switch] $RefreshWorkingParent,
         [switch] $RefreshFocusedParent,
         [string] $ForegroundSelectorJson,
-        [switch] $IncludeRoot
+        [switch] $IncludeRoot,
+        [switch] $CheckBlockingDialog
     )
 
     if (-not $Parent) {
@@ -585,6 +575,7 @@ function Find-PotatoElement {
 
     do {
         $matches = @()
+        $blockingDialog = $null
         $seen=New-Object 'Collections.Generic.HashSet[string]'
         try {
             if ($RefreshWorkingParent -and $attempt -gt 0) {
@@ -617,7 +608,10 @@ function Find-PotatoElement {
                     if ($MaxResults -gt 0 -and $matches.Count -ge $MaxResults) { break }
                 }
             }
-            if (-not $matches.Count -and $Parent.Current.ProcessId -gt 0) {
+            # A confirmed modal can make the disabled provider tree inaccessible.
+            # Inspect it before spending the fallback traversal budget behind it.
+            if (-not $matches.Count -and $CheckBlockingDialog) { $blockingDialog=Get-PotatoBlockingDialog $Parent }
+            if (-not $matches.Count -and -not $blockingDialog -and $Parent.Current.ProcessId -gt 0) {
                 $limit=if ($firstOnly) {1} else {$MaxResults}
                 $fallback=Find-PotatoObservedTreeMatches $Parent $Selector $recurse $limit
                 $matches=@($fallback.matches)
@@ -629,6 +623,15 @@ function Find-PotatoElement {
         }
 
         if ($matches.Count -gt 0) { return $matches }
+        if ($CheckBlockingDialog) {
+            $dialog=if ($blockingDialog) {$blockingDialog} else {Get-PotatoBlockingDialog $Parent}
+            if ($dialog) {
+                $failure=New-Object InvalidOperationException('The requested control is absent and an owned modal dialog blocks the working window. Inspect error.blockingDialog and the actual GUI before recovery.')
+                $failure.Data['PotatoErrorType']='WaitBlockedByDialog';$failure.Data['NoInputSent']=$true
+                $failure.Data['blockingDialog']=$dialog
+                throw $failure
+            }
+        }
         if ((Get-Date) -lt $stopAt) { Start-Sleep -Milliseconds 100 }
     } while ((Get-Date) -lt $stopAt)
 
@@ -1355,7 +1358,8 @@ function Invoke-PotatoSelect {
     $foregroundSelector=if (-not $inputs.path -and (Get-PotatoArg $ArgsMap @('Scope')) -eq 'ForegroundWindow') {Get-PotatoArg $ArgsMap @('WindowSelectorJson')} else {$null}
     $includeRoot=(($refreshFocus -or $foregroundSelector) -and $windowQuery) -or
         ($PresenceOnly -and -not $inputs.path -and ($refresh -or $refreshFocus -or $foregroundSelector))
-    $elements = @(@(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus -ForegroundSelectorJson $foregroundSelector -IncludeRoot:$includeRoot) |
+    $checkDialog=$PresenceOnly -and (Get-PotatoArg $ArgsMap @('Scope') 'Working') -eq 'Working'
+    $elements = @(@(Find-PotatoElement -Selector $selector -Parent $pathResult.element -TimeoutMs $timeoutMs -FindFirst:$findFirst -MaxResults $maxResults -RefreshWorkingParent:$refresh -RefreshFocusedParent:$refreshFocus -ForegroundSelectorJson $foregroundSelector -IncludeRoot:$includeRoot -CheckBlockingDialog:$checkDialog) |
         Select-Object -First $maxResults)
 
     [ordered]@{
@@ -1374,7 +1378,8 @@ function Move-PotatoMouse {
         [int] $Y
     )
 
-    [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point($X, $Y)
+    if (-not (Initialize-PotatoNativeMouse)) { throw 'Native mouse input is not available in this PowerShell session.' }
+    [PotatoMouseNative]::MoveTo($X,$Y)
 }
 
 function Invoke-PotatoMouseClick {
@@ -1843,16 +1848,7 @@ function Move-PotatoMouseSmooth {
         [int] $DurationMs = 300
     )
 
-    $width = $EndX - $StartX
-    $height = $EndY - $StartY
-    $steps = [Math]::Max(1, [Math]::Ceiling($DurationMs / 10.0))
-    for ($i = 0; $i -lt $steps; $i++) {
-        $x = $StartX + (($width / $steps) * $i)
-        $y = $StartY + (($height / $steps) * $i)
-        Move-PotatoMouse -X ([int]$x) -Y ([int]$y)
-        Start-Sleep -Milliseconds ([int][Math]::Max(1, $DurationMs / $steps))
-    }
-    Move-PotatoMouse -X $EndX -Y $EndY
+    [PotatoMouseNative]::MoveSmooth($StartX,$StartY,$EndX,$EndY,$DurationMs)
 }
 
 function Resolve-PotatoDragEndpoint {
@@ -1863,7 +1859,11 @@ function Resolve-PotatoDragEndpoint {
     if ($ArgsMap.ContainsKey($selectorKey)) {
         if ($ArgsMap.ContainsKey($xKey) -or $ArgsMap.ContainsKey($yKey)) { throw "Use either $selectorKey or $xKey/$yKey, not both." }
         $target=Resolve-PotatoCommandTarget -ArgsMap @{SelectorJson=$ArgsMap[$selectorKey]} -AllowPathAsTarget
-        if (-not $target.ok) { throw "$Endpoint drag selector failed: $($target.error)" }
+        if (-not $target.ok) {
+            $failure=New-Object InvalidOperationException("$Endpoint drag selector failed: $($target.error)")
+            $failure.Data['PotatoErrorType']='TargetNotFound';$failure.Data['NoInputSent']=$true
+            throw $failure
+        }
         $info=ConvertTo-PotatoElementInfo $target.element
         if (-not $info.isEnabled -or $info.isOffscreen) { throw "$Endpoint drag element must be enabled and visible." }
         $rx=Get-PotatoArg $ArgsMap @($Endpoint+'RelativeX') 0.5
@@ -1898,13 +1898,22 @@ function Invoke-PotatoDrag {
     }
     Move-PotatoMouse -X $startX -Y $startY
     Start-Sleep -Milliseconds 50
+    $pressed=$false
     try {
         [PotatoMouseNative]::MouseEvent(0x0002, 0, 0, 0, 0)
+        $pressed=$true
         Start-Sleep -Milliseconds 50
         if ($smooth) { Move-PotatoMouseSmooth -StartX $startX -StartY $startY -EndX $endX -EndY $endY -DurationMs $durationMs } else { Move-PotatoMouse -X $endX -Y $endY }
+    } catch {
+        if ($pressed) {
+            $diagnostic=$_.Exception
+            while (-not $diagnostic.Data['PotatoErrorType'] -and $diagnostic.InnerException) { $diagnostic=$diagnostic.InnerException }
+            $diagnostic.Data['NoInputSent']=$false
+        }
+        throw
     } finally {
         # A provider/motion error must never leave the desktop mouse held down.
-        [PotatoMouseNative]::MouseEvent(0x0004, 0, 0, 0, 0)
+        if ($pressed) { [PotatoMouseNative]::MouseEvent(0x0004, 0, 0, 0, 0) }
     }
     [ordered]@{ dragged = $true; released=$true; verified=$null; verificationPerformed=$false;
         start=$source.point; end=$destination.point; source=$source.element; target=$destination.element; durationMs=$durationMs; smooth=$smooth }
@@ -2424,6 +2433,7 @@ function Invoke-PotatoCliCommandCore {
             $errorObject.type=$diagnostic.Data['PotatoErrorType']
             $errorObject.candidates=$diagnostic.Data['candidates']
             if ($diagnostic.Data['focus']) { $errorObject.focus=$diagnostic.Data['focus'] }
+            if ($diagnostic.Data['blockingDialog']) { $errorObject.blockingDialog=$diagnostic.Data['blockingDialog'] }
             if ($diagnostic.Data['NoInputSent']) { $dispatched=$false }
         }
         if ($script:CurrentState) { try { Write-PotatoLog -Command $normalized -Level Error -Message $errorObject.message } catch {} }
