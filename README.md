@@ -218,6 +218,10 @@ no extractable text fails clearly. `read-pdf` needs no desktop, takes no desktop
 lock, and does not read or change CLI session state. PDF contents are returned as
 data and never executed.
 
+Use `wait-file` for a testcase that expects only a PDF to exist. `read-pdf`,
+page rendering and content comparisons are optional checks for testcases that
+explicitly require content verification.
+
 Run `tests\Pdf.Tests.ps1` for dependency-free regression checks; optionally pass
 `-SampleDirectory 'C:\Users\you\Downloads'` to check the six supplied sample names.
 

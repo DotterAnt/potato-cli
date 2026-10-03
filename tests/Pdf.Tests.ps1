@@ -145,6 +145,10 @@ endcmap
     Write-TestPdf $path $objects
     $response = Invoke-PotatoCliCommand read-pdf @('-Path', $path) -AsObject
     Check (-not $response.ok -and $response.error.message -like '*No extractable*') 'Empty/image-only PDF reported success.'
+    $existence=Invoke-PotatoCliCommand wait-file @('-Path',$path,'-TimeoutMs','1000') -AsObject
+    Check ($existence.ok -and $existence.data.conditionMet -and $existence.data.exists) 'Existence-only PDF check required extractable content.'
+    $help=Invoke-PotatoCliCommand help @('-Topic','read-pdf','-Format','Full') -AsObject
+    Check ($help.ok -and $help.data.help.imageContent -match 'existence-only' -and $help.data.help.imageContent -match 'use wait-file') 'CLI help required extra inspection for an existence-only PDF expectation.'
     $objects[5] = '<< /Length 1 /Filter /LZWDecode >>' + "`nstream`nx`nendstream"
     Write-TestPdf $path $objects
     Check (-not (Invoke-PotatoCliCommand read-pdf @('-Path', $path) -AsObject).ok) 'Unsupported stream filter reported success.'
