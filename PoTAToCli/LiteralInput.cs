@@ -8,6 +8,24 @@ using System.Diagnostics;
 
 // Unicode keyboard events, never clipboard or application object-model writes.
 public static class PotatoLiteralInput {
+    const int ConsumptionStabilityMs=50;
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode)] static extern IntPtr CreateWaitableTimerExW(IntPtr attributes,string name,uint flags,uint access);
+    [DllImport("kernel32.dll")] static extern bool SetWaitableTimer(IntPtr timer,ref long dueTime,int period,IntPtr completion,IntPtr argument,bool resume);
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    // Per-operation timer: precise local waits without changing the system's
+    // timer resolution. Older Windows builds fall back to ordinary sleeps.
+    sealed class TypingWait : IDisposable {
+        IntPtr handle=CreateWaitableTimerExW(IntPtr.Zero,null,2,0x00100002);
+        public void Sleep(int milliseconds) {
+            if (milliseconds<=0) {Thread.Yield();return;}
+            long dueTime=-(long)milliseconds*10000;
+            if (handle!=IntPtr.Zero && SetWaitableTimer(handle,ref dueTime,0,IntPtr.Zero,IntPtr.Zero,false) &&
+                WaitForSingleObject(handle,(uint)(milliseconds+1000))==0) return;
+            Thread.Sleep(milliseconds);
+        }
+        public void Dispose() {if (handle!=IntPtr.Zero) {CloseHandle(handle);handle=IntPtr.Zero;}}
+    }
     [StructLayout(LayoutKind.Sequential)]
     struct KeyboardInput { public ushort key, scan; public uint flags, time; public IntPtr extra; }
     [StructLayout(LayoutKind.Sequential)]
@@ -111,7 +129,7 @@ public static class PotatoLiteralInput {
     public static void SendText(string text) {
         var info=new GuiThreadInfo {size=(uint)Marshal.SizeOf(typeof(GuiThreadInfo))};
         if (!GetGUIThreadInfo(0,ref info)) throw new InvalidOperationException("Cannot confirm keyboard focus before typing.");
-        SendText(text,5,GetForegroundWindow().ToInt64(),info.focus.ToInt64());
+        SendText(text,20,GetForegroundWindow().ToInt64(),info.focus.ToInt64());
     }
     public static void SendText(string text, int delayMs, long foregroundHandle, long focusHandle) {
         SendCore(text,delayMs,foregroundHandle,focusHandle,0,0,3000);
@@ -121,16 +139,23 @@ public static class PotatoLiteralInput {
     }
     public static void SendTextAcknowledged(string text,int delayMs,long foregroundHandle,long focusHandle,int process,int timeoutMs) {
         if (timeoutMs<0 || timeoutMs>60000) throw new ArgumentOutOfRangeException("timeoutMs");
-        // Only empty replacement fields have an unambiguous expected prefix.
-        // Wait for queued Backspace to be consumed; never repeat clearing/input.
-        var timer=Stopwatch.StartNew();
-        while (ReadEmptyEditTarget(focusHandle,process).Length!=0) {
+        // Only empty fields have an unambiguous expected prefix. Settle the
+        // initial/cleared state; never repeat clearing or keyboard input.
+        var timer=Stopwatch.StartNew(); long emptySince=-1;
+        int stabilityMs=Math.Min(ConsumptionStabilityMs,timeoutMs);
+        using (var pause=new TypingWait()) {
+        while (true) {
+            if (ReadEmptyEditTarget(focusHandle,process).Length==0) {
+                if (emptySince<0) emptySince=timer.ElapsedMilliseconds;
+                if (timer.ElapsedMilliseconds-emptySince>=stabilityMs) break;
+            } else emptySince=-1;
             if (timer.ElapsedMilliseconds>=timeoutMs) {
                 var failure=new InvalidOperationException("Replacement field did not become empty; no text was sent. Inspect it before retrying.");
                 failure.Data["PotatoErrorType"]="TextClearNotReady";failure.Data["NoInputSent"]=true;
                 throw failure;
             }
-            Thread.Sleep(2);
+            pause.Sleep(emptySince>=0 ? (int)Math.Max(1,stabilityMs-(timer.ElapsedMilliseconds-emptySince)) : 2);
+        }
         }
         SendCore(text,delayMs,foregroundHandle,focusHandle,focusHandle,process,timeoutMs);
     }
@@ -145,6 +170,7 @@ public static class PotatoLiteralInput {
             }
         }
         text = text.Replace("\r\n", "\n").Replace("\r", "\n");
+        using (var pause=new TypingWait()) {
         for (int offset=0; offset<text.Length;) {
             var info=new GuiThreadInfo {size=(uint)Marshal.SizeOf(typeof(GuiThreadInfo))};
             if (foregroundHandle==0 || focusHandle==0 || GetForegroundWindow().ToInt64()!=foregroundHandle ||
@@ -168,17 +194,27 @@ public static class PotatoLiteralInput {
             if (sent!=inputs.Length)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Text input was incomplete; observe the field before retrying.");
             offset+=length;
-            if (delayMs>0) Thread.Sleep(delayMs);
+            if (delayMs>0) pause.Sleep(delayMs);
             if (acknowledgedEdit!=0) {
-                string expected=text.Substring(0,offset),actual="";
-                var timer=Stopwatch.StartNew();
+                string expected=text.Substring(0,offset),actual="",previous=null;
+                var timer=Stopwatch.StartNew(); long consumedSince=-1;
+                int stabilityMs=Math.Min(ConsumptionStabilityMs,timeoutMs);
                 do {
                     if (GetForegroundWindow().ToInt64()!=foregroundHandle || !GetGUIThreadInfo(0,ref info) || info.focus.ToInt64()!=focusHandle) {
                         var changed=new InvalidOperationException("Keyboard target changed while acknowledging text. Inspect content before retrying.");
                         changed.Data["PotatoErrorType"]="InputFocusChanged";changed.Data["NoInputSent"]=false;throw changed;
                     }
                     actual=ReadEmptyEditTarget(acknowledgedEdit,process);
-                    if (PrefixConsumed(acknowledgedEdit,expected,actual)) break;
+                    // A readable prefix does not mean deferred edit/autocomplete
+                    // work accepts another packet yet. Require unchanged matching
+                    // readback across a scheduler interval before advancing. Do
+                    // not resend a missing character or weaken exact verification.
+                    if (PrefixConsumed(acknowledgedEdit,expected,actual)) {
+                        if (consumedSince<0 || !String.Equals(previous,actual,StringComparison.Ordinal))
+                            consumedSince=timer.ElapsedMilliseconds;
+                        if (timer.ElapsedMilliseconds-consumedSince>=stabilityMs) break;
+                    } else consumedSince=-1;
+                    previous=actual;
                     if (timer.ElapsedMilliseconds>=timeoutMs) {
                         var failure=new InvalidOperationException("Edit did not consume the typed prefix exactly. Remaining text was stopped; input was not repeated. Inspect actual text rather than assuming path/extension normalization.");
                         failure.Data["PotatoErrorType"]="TextConsumptionFailed";failure.Data["NoInputSent"]=false;
@@ -187,13 +223,13 @@ public static class PotatoLiteralInput {
                         failure.Data["acknowledgementMs"]=timer.ElapsedMilliseconds;failure.Data["timeoutMs"]=timeoutMs;
                         throw failure;
                     }
-                    // Fast controls usually consume the packet immediately.
-                    // Yield briefly before falling back to a scheduler sleep;
-                    // a blind 1..5 ms sleep can round to an entire Windows tick.
-                    if (delayMs==0 && timer.ElapsedMilliseconds<2) Thread.Yield();
-                    else Thread.Sleep(1);
+                    // Leave the GUI thread idle during settling. Continuous
+                    // synchronous WM_GETTEXT polling can delay its deferred
+                    // completion/timer work even while text is already visible.
+                    pause.Sleep(consumedSince>=0 ? (int)Math.Max(1,stabilityMs-(timer.ElapsedMilliseconds-consumedSince)) : 2);
                 } while (true);
             }
+        }
         }
     }
 }

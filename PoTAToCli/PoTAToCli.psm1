@@ -1761,7 +1761,7 @@ function Invoke-PotatoType {
     $preDelete = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('PreDelete')) $false
     $verify = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('Verify')) ([bool](Get-PotatoArg $ArgsMap @('PathKind')))
     $typeByCharacter = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('TypeByCharacter')) $false
-    $inputDelayMs=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('InputDelayMs')) $(if ($typeByCharacter) {50} else {5})
+    $inputDelayMs=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('InputDelayMs')) $(if ($typeByCharacter) {50} else {20})
     if ($inputDelayMs -lt 0 -or $inputDelayMs -gt 100 -or ($typeByCharacter -and $ArgsMap.ContainsKey('InputDelayMs'))) { throw 'InputDelayMs must be 0..100; do not combine it with the legacy TypeByCharacter flag.' }
     $useWildcard = ConvertTo-PotatoBool (Get-PotatoArg -ArgsMap $ArgsMap -Names @('UseWildcardForVerify')) $false
     $verifyMode = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('VerifyMode') -Default $(if ($useWildcard) { 'Contains' } else { 'Exact' }))
@@ -1827,7 +1827,8 @@ function Invoke-PotatoType {
     $targetInfo = ConvertTo-PotatoElementInfo $element
     $clearMethod = [string](Get-PotatoArg -ArgsMap $ArgsMap -Names @('ClearMethod') -Default 'Selection')
     if ($clearMethod -notin @('Selection', 'Shortcut')) { throw 'ClearMethod must be Selection or Shortcut.' }
-    if ($verify) { [void](Get-PotatoEditableText -Element $element) }
+    $initialText=$null
+    if ($verify) {$initialText=Get-PotatoEditableText -Element $element}
     $clearInputSent=$false
     if ($preDelete) {
         $cleared=Clear-PotatoEditableText -Element $element -Method $clearMethod
@@ -1849,15 +1850,15 @@ function Invoke-PotatoType {
         $failure.Data['NoInputSent']=-not $clearInputSent
         throw $failure
     }
-    $acknowledged=$verify -and $verifyMode -eq 'Exact' -and $preDelete -and
+    $acknowledged=$verify -and $verifyMode -eq 'Exact' -and ($preDelete -or $initialText -ceq '') -and
         [long]$targetInfo.nativeWindowHandle -eq [long]$native.focusHandle -and
         [PotatoWindowIdentity]::IsStandardEdit([IntPtr][long]$native.focusHandle,[int]$targetInfo.processId,$true) -and
         ([string]$text).Length -le 65536 -and ([string]$text).IndexOfAny([char[]]@("`r","`n","`t")) -lt 0
-    # Single-line replacement fields can acknowledge consumption between scalars.
+    # Empty/cleared single-line fields can acknowledge consumption between scalars.
     # Other editors retain the tested pacing/final verification path.
     if ($acknowledged -and -not [PotatoWindowIdentity]::IsMultilineEdit([IntPtr][long]$native.focusHandle)) {
-        # Readback provides pacing on this path. Honor explicit/legacy delays,
-        # but don't sleep blindly when an ordinary Edit already consumed input.
+        # Stable readback provides pacing on this path. Honor explicit/legacy
+        # delays; one transient matching prefix is not enough to advance.
         if (-not $ArgsMap.ContainsKey('InputDelayMs') -and -not $typeByCharacter) {$inputDelayMs=0}
         try {[PotatoLiteralInput]::SendTextAcknowledged([string]$text,$inputDelayMs,[long]$native.foregroundHandle,[long]$native.focusHandle,[int]$targetInfo.processId,$verifyTimeoutMs)}
         catch {

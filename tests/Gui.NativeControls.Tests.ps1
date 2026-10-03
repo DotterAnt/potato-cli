@@ -23,7 +23,7 @@ public class NativeControlFixture : Form {
     [DllImport("user32.dll")] static extern uint InSendMessageEx(IntPtr reserved);
     public IntPtr Combo;
     public string Output;
-    public NativeControlFixture() { Width=390; Height=365; }
+    public NativeControlFixture() { Width=390; Height=415; }
     protected override bool ProcessDialogKey(Keys key) {
         // This raw HWND has no managed Control wrapper. Let its own window
         // procedure receive arrows instead of WinForms navigating to a button.
@@ -43,6 +43,8 @@ public class NativeControlFixture : Form {
         CompletionEdit=new DeferredEdit(completion,true);
         var delayed=CreateWindowExW(0,"Edit","",0x50010080,20,275,290,25,Handle,new IntPtr(106),IntPtr.Zero,IntPtr.Zero);
         DelayedEdit=new DeferredEdit(delayed,false,800);
+        var settling=CreateWindowExW(0,"Edit","",0x50010080,20,315,290,25,Handle,new IntPtr(107),IntPtr.Zero,IntPtr.Zero);
+        SettlingEdit=new BusyAfterReadbackEdit(settling);
     }
     protected override void WndProc(ref Message m) {
         base.WndProc(ref m);
@@ -54,6 +56,24 @@ public class NativeControlFixture : Form {
     public DeferredEdit SlowEdit;
     public DeferredEdit CompletionEdit;
     public DeferredEdit DelayedEdit;
+    public BusyAfterReadbackEdit SettlingEdit;
+}
+// Text becomes readable before deferred editor/completion work accepts the
+// next character. A single matching read is insufficient pacing feedback.
+public class BusyAfterReadbackEdit : NativeWindow {
+    Timer timer=new Timer(); bool busy;
+    public BusyAfterReadbackEdit(IntPtr handle) {
+        AssignHandle(handle);timer.Interval=25;
+        timer.Tick+=(s,e)=>{timer.Stop();busy=false;};
+    }
+    protected override void WndProc(ref Message message) {
+        if (message.Msg==0x102 && message.WParam.ToInt64()>=32) {
+            if (busy) return;
+            base.WndProc(ref message);
+            busy=true;timer.Start();return;
+        }
+        base.WndProc(ref message);
+    }
 }
 // Models an editor which consumes a Unicode scalar asynchronously. Events
 // arriving while its autocomplete work is pending are dropped by this fixture.
@@ -131,7 +151,7 @@ $form.Show();$form.Hide()
     while (-not [IO.File]::Exists($output+'.double') -and $watch.ElapsedMilliseconds -lt 2000) {Start-Sleep -Milliseconds 20}
     Check ($double.data.action -eq 'Mouse' -and $double.data.clickCount -eq 2 -and [IO.File]::ReadAllLines($output+'.double').Count -eq 1) 'Atomic double-click did not produce exactly one actual double-click event.'
     $text='C:\fixture\PhotosTest.pdf'
-    $unpaced=Invoke-PotatoCliCommand type @('-AutomationId','104','-Text',$text,'-Verify','-VerifyTimeoutMs','150','-InputDelayMs','5') -CliRoot $root -AsObject
+    $unpaced=Invoke-PotatoCliCommand type @('-AutomationId','104','-Text',$text,'-Verify','-VerifyMode','Contains','-VerifyTimeoutMs','150','-InputDelayMs','5') -CliRoot $root -AsObject
     Check (-not $unpaced.ok -and $unpaced.error.type -eq 'VerificationFailed') 'Slow Edit fixture failed to reproduce loss with queued typing.'
     $typed=Invoke-Fixture type @('-AutomationId','104','-Text',$text,'-PreDelete','-Verify','-InputDelayMs','5')
     Check ($typed.data.verified -and $typed.data.consumptionAcknowledged) 'Acknowledged typing lost characters in an asynchronous standard Edit.'
@@ -141,6 +161,14 @@ $form.Show();$form.Hide()
     Check ($completed.data.verified -and $completed.data.consumptionAcknowledged -and (Invoke-Fixture read @('-AutomationId','105')).data.text -ceq $text) 'Selected autocomplete suffix blocked typing or substituted for final exact readback.'
     $delayed=Invoke-Fixture type @('-AutomationId','106','-Text','slow','-PreDelete','-Verify','-VerifyTimeoutMs','1500')
     Check ($delayed.data.verified -and $delayed.data.consumptionAcknowledged -and (Invoke-Fixture read @('-AutomationId','106')).data.text -ceq 'slow') 'Prefix acknowledgement ignored the requested verification timeout and stopped before the delayed control consumed input.'
+    $replace=$false
+    foreach ($candidate in @('C:\fixture\output.pdf','C:\\fixture\\output.pdf')) {
+        $typing=@('-AutomationId','107','-Text',$candidate,'-Verify','-VerifyTimeoutMs','1000')
+        if ($replace) {$typing+='-PreDelete'}
+        $settled=Invoke-Fixture type $typing
+        Check ($settled.data.consumptionAcknowledged -and $settled.data.verified -and (Invoke-Fixture read @('-AutomationId','107')).data.text -ceq $candidate) 'A visible prefix was treated as readiness and the following character was dropped.'
+        $replace=$true
+    }
     $rejected=Invoke-PotatoCliCommand type @('-AutomationId','104','-Text','start!tail','-PreDelete','-Verify','-InputDelayMs','5') -CliRoot $root -AsObject
     Check (-not $rejected.ok -and $rejected.error.type -eq 'TextConsumptionFailed' -and $rejected.outcome -eq 'unknown') 'Lost text was repeated or treated as no-input/success.'
     $read=Invoke-Fixture read @('-AutomationId','104')

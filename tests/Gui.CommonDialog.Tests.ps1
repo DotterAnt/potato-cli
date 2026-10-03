@@ -46,6 +46,7 @@ $form.Show();$form.Hide()
     $times=@()
     foreach ($index in 1..10) {
         $path=Join-Path $folder ('Unicode '+[char]0x151+' output '+$index+'.pdf')
+        if ($index -gt 6) {$path=$path.Replace('\','\\')}
         $typed=Invoke-Fixture type ($scope+@('-AutomationId','1001','-ControlType','Edit','-Text',$path,'-PathKind','SaveFile','-PreDelete','-Verify'))
         $read=Invoke-Fixture read ($scope+@('-AutomationId','1001','-ControlType','Edit'))
         if (-not $typed.data.consumptionAcknowledged -or -not $typed.data.verified -or $read.data.text -cne $path) {throw 'File-dialog input failed actual exact readback.'}

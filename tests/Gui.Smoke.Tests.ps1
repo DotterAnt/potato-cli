@@ -34,7 +34,7 @@ public class PacedInputFixture : OpaqueInputFixture {
     protected override void OnKeyPress(KeyPressEventArgs e) {
         if (e.KeyChar=='\r') {System.IO.File.WriteAllText(OutputPath,Received);Received="";previous=-100;high=false;return;}
         long now=clock.ElapsedMilliseconds;
-        if (now-previous>=2 || (high && char.IsLowSurrogate(e.KeyChar))) {Received+=e.KeyChar;high=char.IsHighSurrogate(e.KeyChar);previous=now;}
+        if (now-previous>=18 || (high && char.IsLowSurrogate(e.KeyChar))) {Received+=e.KeyChar;high=char.IsHighSurrogate(e.KeyChar);previous=now;}
     }
 }
 public class SwitchingInputFixture : OpaqueInputFixture {
@@ -181,10 +181,14 @@ $form.Show(); $form.Hide()
     if ([IO.File]::ReadAllText($output+'.native') -cne "Native focus`r") { throw 'Native focus fallback did not deliver literal text and navigation to the real control.' }
     Invoke-Fixture click @('-Name','Fixture paced editor','-Method','Mouse') | Out-Null
     $pacedText=('abcdefghij'*8)+[char]::ConvertFromUtf32(0x1f642)
+    $fast=Invoke-Fixture type @('-TargetMode','Focused','-Text',$pacedText,'-InputDelayMs','5','-FallbackReason','Reproduce rate-sensitive character loss','-FallbackEvidence','fixture')
+    Invoke-Fixture press-key @('-Key','Enter','-FallbackReason','Commit fixture input','-FallbackEvidence','fixture') | Out-Null
+    Invoke-Fixture wait-file @('-Path',($output+'.paced'),'-TimeoutMs','2000','-MinBytes','1') | Out-Null
+    if ([IO.File]::ReadAllText($output+'.paced') -ceq $pacedText) {throw 'Rate-sensitive fixture did not reproduce the old 5 ms character loss.'}
     $paced=Invoke-Fixture type @('-TargetMode','Focused','-Text',$pacedText,'-FallbackReason','Observed rate-sensitive custom editor','-FallbackEvidence','fixture')
     Invoke-Fixture press-key @('-Key','Enter','-FallbackReason','Commit fixture input','-FallbackEvidence','fixture') | Out-Null
     Invoke-Fixture wait-file @('-Path',($output+'.paced'),'-TimeoutMs','2000','-MinBytes','1') | Out-Null
-    if ($paced.data.inputDelayMs -ne 5 -or [IO.File]::ReadAllText($output+'.paced') -cne $pacedText) {throw 'Default pacing lost characters in the rate-sensitive GUI fixture.'}
+    if ($paced.data.inputDelayMs -ne 20 -or [IO.File]::ReadAllText($output+'.paced') -cne $pacedText) {throw 'Default pacing lost characters in the rate-sensitive GUI fixture.'}
     $legacy=Invoke-Fixture type @('-TargetMode','Focused','-Text',$pacedText,'-TypeByCharacter','-FallbackReason','Compare legacy pacing','-FallbackEvidence','fixture')
     Invoke-Fixture press-key @('-Key','Enter','-FallbackReason','Commit fixture input','-FallbackEvidence','fixture') | Out-Null
     if ($legacy.data.inputDelayMs -ne 50 -or [IO.File]::ReadAllText($output+'.paced') -cne $pacedText) {throw 'Legacy pacing split Unicode scalars or lost text.'}
