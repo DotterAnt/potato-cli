@@ -21,7 +21,7 @@ function Get-PotatoWindowCheckpoint {
     $checkpoint=@($script:CurrentState.windowCheckpoints | Where-Object {$_.id -ceq $Id}) | Select-Object -Last 1
     if (-not $checkpoint -and $script:CurrentState.windowCheckpoint.id -ceq $Id) {$checkpoint=$script:CurrentState.windowCheckpoint}
     if (-not $Id -or -not $checkpoint) {
-        $failure=[InvalidOperationException]::new('SinceCheckpoint must identify a retained windows -Checkpoint receipt (last 16). Use the baseline taken before the opening action; a later snapshot cannot prove that an already-open window is new.')
+        $failure=[InvalidOperationException]::new('SinceCheckpoint requires data.checkpointId from windows -Checkpoint, not its explorationCommandId or a script variable. Use the baseline taken before opening; a later snapshot cannot prove an already-open window is new. The last 16 checkpoints are retained.')
         $failure.Data['PotatoErrorType']='CheckpointNotFound';$failure.Data['NoInputSent']=$true
         throw $failure
     }

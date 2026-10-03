@@ -75,6 +75,19 @@ public static class PotatoWindowIdentity {
     public static int PrimaryWidth() { return GetSystemMetrics(0); }
     public static int PrimaryHeight() { return GetSystemMetrics(1); }
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr window,int command);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+    public static bool Activate(IntPtr window,bool maximize) {
+        if (!IsWindow(window) || !IsWindowEnabled(window)) return false;
+        if (maximize) ShowWindowAsync(window,3); // SW_MAXIMIZE
+        else if (IsIconic(window)) ShowWindowAsync(window,9); // SW_RESTORE
+        // Read back activation, regardless of the API's return value.
+        if (ForegroundRoot()!=Root(window)) SetForegroundWindow(window);
+        // No synthetic keystroke/control click. Confirm the real foreground.
+        return ForegroundRoot()==Root(window);
+    }
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
     [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);

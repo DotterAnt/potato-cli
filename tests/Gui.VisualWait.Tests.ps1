@@ -114,6 +114,14 @@ $form.Show();$form.Hide()
     Check ($matched.data.visualWait.meanError -le 8 -and $matched.data.visualWait.maxTileError -le 24) 'Expected-image wait lost measured content errors.'
     $jpegMatch=Run screenshot ($capture+@('-WaitForImageMatch',(Join-Path $root 'reference.jpg'),'-ReferenceRotation','90','-MatchRegionJson',$comparison,'-TimeoutMs','0'))
     Check $jpegMatch.data.conditionMet 'Expected content comparison rejected a legitimate compressed input reference.'
+    # Honor orientation stored as EXIF without changing the reference artifact.
+    $jpeg=[IO.File]::ReadAllBytes((Join-Path $root 'reference.jpg'))
+    $exif=[byte[]](0xff,0xe1,0,34,69,120,105,102,0,0,0x49,0x49,42,0,8,0,0,0,1,0,0x12,1,3,0,1,0,0,0,6,0,0,0,0,0,0,0)
+    $tagged=Join-Path $root 'reference-exif6.jpg'
+    [IO.File]::WriteAllBytes($tagged,[byte[]]($jpeg[0..1]+$exif+$jpeg[2..($jpeg.Length-1)]))
+    $tagHash=(Get-FileHash $tagged).Hash
+    $oriented=Run screenshot ($capture+@('-OutFile',(Join-Path $root 'exif-match.png'),'-WaitForImageMatch',$tagged,'-MatchRegionJson',$comparison,'-TimeoutMs','1000','-StableMs','0'))
+    Check ($oriented.data.conditionMet -and $oriented.data.visualWait.referenceExifOrientation -eq 6 -and (Get-FileHash $tagged).Hash -eq $tagHash) 'Visual wait ignored EXIF display orientation or changed its reference.'
     $wrong=Run screenshot ($capture+@('-OutFile',(Join-Path $root 'wrong.png'),'-WaitForImageMatch',$reference,'-ReferenceRotation','270','-MatchRegionJson',$comparison,'-TimeoutMs','150'))
     Check (-not $wrong.data.conditionMet -and $wrong.data.visualWait.elapsedMs -ge 150 -and (Test-Path $wrong.data.path)) 'Wrong rotation passed or its final diagnostic frame was lost.'
     Check ((Get-FileHash $reference).Hash -eq $hash) 'Expected-image wait changed the source reference.'

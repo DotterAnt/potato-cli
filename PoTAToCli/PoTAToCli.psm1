@@ -829,17 +829,12 @@ function Show-PotatoWindow {
 
     if ($Handle -eq 0) { return $false }
     try {
-        $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
-        if (-not $element) { return $false }
-        if ($Maximize) {
-            try {
-                $pattern = $element.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
-                $pattern.SetWindowVisualState([System.Windows.Automation.WindowVisualState]::Maximized)
-            }
-            catch {}
-        }
-        try { $element.SetFocus() } catch {}
-        return $true
+        Initialize-PotatoWindowIdentity
+        if ([PotatoWindowIdentity]::Activate([IntPtr]$Handle,[bool]$Maximize)) {return $true}
+        # Some accessibility providers activate through their own UI thread.
+        # Retain that route as a fallback, but never swallow a failed activation.
+        try {[Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle).SetFocus()} catch {}
+        return [PotatoWindowIdentity]::ForegroundRoot() -eq [PotatoWindowIdentity]::Root([IntPtr]$Handle)
     }
     catch {
         return $false
@@ -1119,11 +1114,22 @@ function Invoke-PotatoFocus {
         throw $failure
     }
 
+    $activationTimeout=ConvertTo-PotatoInt (Get-PotatoArg $ArgsMap @('FocusTimeoutMs')) 1000
+    if ($activationTimeout -lt 0 -or $activationTimeout -gt 10000) {throw 'FocusTimeoutMs must be 0..10000.'}
+    $handle=[long]$window.Current.NativeWindowHandle
+    $activated=Show-PotatoWindow -Handle $handle -Maximize:$maximize
+    $activationWatch=[Diagnostics.Stopwatch]::StartNew()
+    while (-not $activated -and $activationWatch.ElapsedMilliseconds -lt $activationTimeout) {
+        Start-Sleep -Milliseconds ([int][Math]::Max(1,[Math]::Min(50,$activationTimeout-$activationWatch.ElapsedMilliseconds)))
+        $activated=[PotatoWindowIdentity]::ForegroundRoot() -eq [PotatoWindowIdentity]::Root([IntPtr]$handle)
+    }
+    if (-not $activated) {
+        throw (New-PotatoFocusFailure 'The selected window did not become foreground. No input was sent and the working window was preserved. Inspect actual foreground/modal state before continuing.' (Get-PotatoNativeInputState) 'WindowActivationFailed')
+    }
     $working = Set-PotatoWorkingWindow -Element $window
     $working['windowScoped']=$true
     Save-PotatoState $script:CurrentState
-    [void](Show-PotatoWindow -Handle $working.nativeWindowHandle -Maximize:$maximize)
-    [ordered]@{ working = $working; ownedWindow=$(if ($checkpoint) {New-PotatoOwnedWindow $working} else {$null});
+    [ordered]@{ working = $working; activated=$true; ownedWindow=$(if ($checkpoint) {New-PotatoOwnedWindow $working} else {$null});
         ownershipNote=$(if (-not $checkpoint) {'Plain focus grants no cleanup ownership. For a new GUI handoff use its pre-action checkpoint; intentionally reused windows must be preserved.'}) }
 }
 
@@ -1603,7 +1609,7 @@ function Invoke-PotatoClick {
         if ($elementInfo.isOffscreen -or $elementInfo.boundingRectangle.width -le 0 -or $elementInfo.boundingRectangle.height -le 0) {
             throw 'Mouse click requires a visible, nonempty target rectangle.'
         }
-        if (-not $ArgsMap.ContainsKey('Focus') -and (Get-PotatoArg $ArgsMap @('Scope')) -ne 'ForegroundWindow') {
+        if ((Get-PotatoArg $ArgsMap @('Scope')) -ne 'ForegroundWindow') {
             $node=$target.element
             for ($i=0;$i -lt 32 -and $node;$i++) {
                 if ($node.Current.NativeWindowHandle) {
@@ -1611,7 +1617,12 @@ function Invoke-PotatoClick {
                     $targetRoot=[PotatoWindowIdentity]::Root([IntPtr]$node.Current.NativeWindowHandle)
                     $foreground=[PotatoWindowIdentity]::ForegroundRoot()
                     if ($targetRoot -ne $foreground -and -not [PotatoWindowIdentity]::IsOwnedBy($targetRoot,$foreground) -and -not [PotatoWindowIdentity]::IsOwnedBy($foreground,$targetRoot)) {
-                        [void](Show-PotatoWindow -Handle $targetRoot.ToInt64())
+                        if ($ArgsMap.ContainsKey('Focus') -and -not $focus) {
+                            throw (New-PotatoFocusFailure 'The mouse target is outside the foreground window and Focus false forbids activation. No mouse input was sent.' (Get-PotatoNativeInputState) 'WindowActivationFailed')
+                        }
+                        if (-not (Show-PotatoWindow -Handle $targetRoot.ToInt64())) {
+                            throw (New-PotatoFocusFailure 'The click target window did not become foreground. No mouse input was sent; inspect foreground/modal state.' (Get-PotatoNativeInputState) 'WindowActivationFailed')
+                        }
                     }
                     break
                 }
@@ -2243,7 +2254,7 @@ function Invoke-PotatoScreenshot {
                 $tile=[double](Get-PotatoArg $ArgsMap @('MatchMaxTileError') 24)
                 $aspect=[double](Get-PotatoArg $ArgsMap @('MatchAspectTolerance') 0.02)
                 $frame=[PotatoVisualCapture]::WaitForMatch($reference,$rotation,$screen,$area,$timeout,$stable,$mean,$tile,$aspect)
-                $visualWait=[ordered]@{mode='ExpectedImage';conditionMet=$frame.ConditionMet;referenceRotation=$rotation;meanError=$frame.MeanError;maxTileError=$frame.MaxTileError;aspectError=$frame.AspectError;maxMeanError=$mean;maxTileErrorLimit=$tile;aspectTolerance=$aspect}
+                $visualWait=[ordered]@{mode='ExpectedImage';conditionMet=$frame.ConditionMet;referenceRotation=$rotation;referenceExifOrientation=$frame.ReferenceExifOrientation;meanError=$frame.MeanError;maxTileError=$frame.MaxTileError;aspectError=$frame.AspectError;maxMeanError=$mean;maxTileErrorLimit=$tile;aspectTolerance=$aspect}
             } else {
                 if (@('ReferenceRotation','MatchMaxMeanError','MatchMaxTileError','MatchAspectTolerance') | Where-Object {$ArgsMap.ContainsKey($_)}) {throw 'Image match options require WaitForImageMatch.'}
                 $frame=[PotatoVisualCapture]::Wait($reference,$screen,$area,$timeout,$stable)

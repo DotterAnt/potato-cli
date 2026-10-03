@@ -11,10 +11,32 @@ public sealed class PotatoVisualFrame : IDisposable {
     public int Samples;
     public long ElapsedMs;
     public double MeanError, MaxTileError, AspectError;
+    public int ReferenceExifOrientation=1;
     public void Dispose() { if (Bitmap!=null) { Bitmap.Dispose(); Bitmap=null; } }
 }
 
 public static class PotatoVisualCapture {
+    static int ApplyDisplayOrientation(Image image) {
+        if (Array.IndexOf(image.PropertyIdList,0x0112)<0) return 1;
+        var property=image.GetPropertyItem(0x0112);
+        if (property.Type!=3 || property.Value.Length!=2) throw new ArgumentException("Invalid EXIF orientation metadata.");
+        int orientation=property.Value[0]+256*property.Value[1];
+        if (orientation<1 || orientation>8) orientation=256*property.Value[0]+property.Value[1];
+        RotateFlipType transform;
+        switch (orientation) {
+            case 1: transform=RotateFlipType.RotateNoneFlipNone; break;
+            case 2: transform=RotateFlipType.RotateNoneFlipX; break;
+            case 3: transform=RotateFlipType.Rotate180FlipNone; break;
+            case 4: transform=RotateFlipType.RotateNoneFlipY; break;
+            case 5: transform=RotateFlipType.Rotate90FlipX; break;
+            case 6: transform=RotateFlipType.Rotate90FlipNone; break;
+            case 7: transform=RotateFlipType.Rotate270FlipX; break;
+            case 8: transform=RotateFlipType.Rotate270FlipNone; break;
+            default: throw new ArgumentException("Invalid EXIF orientation metadata.");
+        }
+        if (orientation!=1) image.RotateFlip(transform);
+        return orientation;
+    }
     static void Validate(Rectangle screen,Rectangle comparison,int timeoutMs,int stableMs) {
         if (screen.Width<1 || screen.Height<1 || (long)screen.Width*screen.Height>16777216)
             throw new ArgumentException("Visual wait capture must contain 1..16777216 pixels.");
@@ -112,17 +134,18 @@ public static class PotatoVisualCapture {
             double.IsNaN(maxTileError) || maxTileError<0 || maxTileError>64 ||
             double.IsNaN(aspectTolerance) || aspectTolerance<0 || aspectTolerance>0.1)
             throw new ArgumentException("Image match limits: mean 0..32, tile 0..64, aspect 0..0.1. Fix region/readiness/orientation instead of weakening content checks.");
-        byte[] expected; double aspectError;
+        byte[] expected; double aspectError; int orientation;
         using (var stream=File.Open(referencePath,FileMode.Open,FileAccess.Read,FileShare.ReadWrite)) {
             if (stream.Length>16777216) throw new ArgumentException("Visual reference exceeds 16 MiB.");
             using (var reference=Image.FromStream(stream,false,false)) {
                 if ((long)reference.Width*reference.Height>16777216) throw new ArgumentException("Decoded visual reference exceeds 16777216 pixels.");
+                orientation=ApplyDisplayOrientation(reference);
                 if (rotation!=0) reference.RotateFlip(rotation==90 ? RotateFlipType.Rotate90FlipNone : rotation==180 ? RotateFlipType.Rotate180FlipNone : RotateFlipType.Rotate270FlipNone);
                 aspectError=Math.Abs((comparison.Width/(double)comparison.Height)/(reference.Width/(double)reference.Height)-1);
                 expected=Normalize(reference,new Rectangle(0,0,reference.Width,reference.Height));
             }
         }
-        var result=new PotatoVisualFrame {AspectError=aspectError}; var clock=Stopwatch.StartNew(); long matchingSince=-1;
+        var result=new PotatoVisualFrame {AspectError=aspectError,ReferenceExifOrientation=orientation}; var clock=Stopwatch.StartNew(); long matchingSince=-1;
         try {
             do {
                 if (result.Bitmap!=null) result.Bitmap.Dispose(); result.Bitmap=null;
