@@ -298,6 +298,5 @@ For dialogs, `windows -ProcessId` includes nested modal Window controls when UIA
 
 The author-developed command layer used by AGATA to observe and control Windows applications.
 
-The `tdk-2026-10-24` tag preserves the first submission snapshot;
-`tdk-2026-10-25-final` records the supplemented documentation and MIT licensing.
-See [LICENSE](LICENSE). The original experiment-time code state cannot always be reconstructed from these later snapshots.
+The `tdk-2026-10-25` tag identifies the published thesis source and documentation snapshot with MIT licensing.
+See [LICENSE](LICENSE). The original experiment-time code state cannot always be reconstructed from this snapshot.
