@@ -293,3 +293,11 @@ Additional checks: `tests/Interaction.Tests.ps1` covers policy bypass attempts, 
 Unicode keyboard input avoids keyboard-layout substitutions and sends text in bounded batches. Verification is read-only and never automatically retypes. `tests/Gui.Smoke.Tests.ps1` opens an isolated test form to verify literal Unicode input, TextPattern replacement, a visible Save action, output content, and scoped closure.
 
 For dialogs, `windows -ProcessId` includes nested modal Window controls when UIA exposes them. `close-window -ProcessId` closes modal dialogs before the parent. A stale working window does not restrict `-ModalOnly` queries to its subtree.
+
+## AGATA thesis materials
+
+The author-developed command layer used by AGATA to observe and control Windows applications.
+
+The `tdk-2026-10-24` tag preserves the first submission snapshot;
+`tdk-2026-10-25` records the supplemented documentation and MIT licensing.
+See [LICENSE](LICENSE). The original experiment-time code state cannot always be reconstructed from these later snapshots.
